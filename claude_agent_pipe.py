@@ -49,6 +49,7 @@ from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
     ClaudeSDKClient,
+    CLIJSONDecodeError,
     ResultMessage,
     StreamEvent,
     SystemMessage,
@@ -1139,6 +1140,20 @@ class Pipe:
             default=30,
             description="Maximum agent turns per user message. 0 disables the cap.",
         )
+        MAX_BUFFER_MB: int = Field(
+            default=32,
+            description=(
+                "Maximum size (MiB) of a single stream-json message read back "
+                "from the Claude Code CLI. The SDK's own default is 1 MiB, "
+                "which a Read of any attachment over ~780 KiB blows past once "
+                "base64 expansion (~1.34x) and the JSON envelope are counted — "
+                "killing the message reader mid-response. 32 MiB clears the "
+                "10 MiB image-attachment cap with room to spare and matches "
+                "the Anthropic API's own 32 MB request-body ceiling, so the "
+                "framer stops rejecting payloads the API would have accepted. "
+                "0 falls back to the SDK default."
+            ),
+        )
         SETTING_SOURCES: str = Field(
             default="",
             description=(
@@ -1454,6 +1469,10 @@ class Pipe:
             "system_prompt": system_text,
             "include_partial_messages": True,
         }
+        if self.valves.MAX_BUFFER_MB:
+            options_kwargs["max_buffer_size"] = (
+                self.valves.MAX_BUFFER_MB * 1024 * 1024
+            )
         if kb_server is not None:
             options_kwargs["mcp_servers"] = {"helm-kb": kb_server}
         options = ClaudeAgentOptions(**options_kwargs)
@@ -1546,6 +1565,16 @@ class Pipe:
                                         )
                     elif isinstance(message, ResultMessage):
                         return
+        except CLIJSONDecodeError:
+            log.exception("Lite-agent fast path exceeded the stream-json buffer")
+            yield (
+                "\n\n**Response too large to read back.** A single message from "
+                "the Claude Code CLI exceeded the "
+                f"{self.valves.MAX_BUFFER_MB} MiB `MAX_BUFFER_MB` limit — "
+                "usually a very large file or image read into the transcript. "
+                "Raise `MAX_BUFFER_MB` in the pipe's valves, or work with a "
+                "smaller file.\n"
+            )
         except Exception as exc:
             log.exception("Lite-agent fast path failed")
             yield f"\n\n**Fast-path error:** `{type(exc).__name__}: {exc}`\n"
@@ -1643,6 +1672,10 @@ class Pipe:
             options_kwargs["resume"] = resume_id
         if self.valves.MAX_TURNS:
             options_kwargs["max_turns"] = self.valves.MAX_TURNS
+        if self.valves.MAX_BUFFER_MB:
+            options_kwargs["max_buffer_size"] = (
+                self.valves.MAX_BUFFER_MB * 1024 * 1024
+            )
         if kb_server is not None:
             options_kwargs["mcp_servers"] = {"helm-kb": kb_server}
 
@@ -1839,6 +1872,17 @@ class Pipe:
                         # noise, and TTS reads it aloud in call mode.
                         return
 
+        except CLIJSONDecodeError:
+            log.exception("Claude Agent SDK pipe exceeded the stream-json buffer")
+            await emit_status("Error: response exceeded read buffer", done=True)
+            yield (
+                "\n\n**Response too large to read back.** A single message from "
+                "the Claude Code CLI exceeded the "
+                f"{self.valves.MAX_BUFFER_MB} MiB `MAX_BUFFER_MB` limit — "
+                "usually a very large file or image read into the transcript. "
+                "Raise `MAX_BUFFER_MB` in the pipe's valves, or work with a "
+                "smaller file.\n"
+            )
         except Exception as exc:
             log.exception("Claude Agent SDK pipe failed")
             await emit_status(f"Error: {exc}", done=True)
