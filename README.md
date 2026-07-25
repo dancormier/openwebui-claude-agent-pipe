@@ -18,6 +18,14 @@ Base: [tfriedel/openwebui-claude-code](https://github.com/tfriedel/openwebui-cla
    (e.g. after an OWUI restart), which then resume warm from the new session.
 6. **No cost footer** — the per-response cost/usage line is dropped; subscription
    billing makes it noise, and TTS reads it aloud in call mode.
+7. **Durable sessions** — chat_id → session_id persisted to
+   `WORKDIR_ROOT/<chat_id>/.session.json`; survives OWUI restarts and
+   redeploys. In-process map is now only a cache.
+8. **Keyless warm sessions** — callers without chat_id (Conduit) get session
+   identity via a conversation-prefix fingerprint stored in
+   `WORKDIR_ROOT/_sessions.json`; each keyless chat gets its own
+   `anon-<uuid>` workdir (shared `default` retired). Dead resume ids retry
+   the turn cold once.
 
 To redeploy after editing: update the function content via the admin API
 (see vault: Projects/Revised home AI hub plan/Implementation Plan, Task 3.2)

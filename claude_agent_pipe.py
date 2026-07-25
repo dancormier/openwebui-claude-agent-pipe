@@ -9,6 +9,7 @@ requirements: claude-agent-sdk>=0.1.60, anthropic>=0.40.0
 
 import asyncio
 import base64
+import hashlib
 import json
 import logging
 import mimetypes
@@ -170,6 +171,140 @@ def _redacting_emitter(
         return await emitter(_redact_event(event, hits))
 
     return _emit
+
+
+def _message_text(message: Dict[str, Any]) -> str:
+    """Plain text of one OpenAI-shape message (string or content-parts list).
+    Non-text parts (image_url, …) are skipped."""
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        texts = [
+            part.get("text", "")
+            for part in content
+            if isinstance(part, dict) and part.get("type") == "text"
+        ]
+        return "\n".join(t for t in texts if t)
+    return ""
+
+
+# ── Session persistence ─────────────────────────────────────────────────────
+# The in-process _chat_sessions map dies on every OWUI restart, pipe
+# redeploy, and valve edit — silently downgrading chats to flattened-text
+# history replay. These helpers persist session identity as small JSON files
+# under WORKDIR_ROOT: a per-chat meta file for keyed callers (native UI) and
+# a fingerprint→session store for keyless callers (Conduit and other generic
+# OpenAI-API clients, which send no chat_id). Files hold session ids and
+# paths only — never credentials.
+
+_SESSION_META_FILE = ".session.json"
+_FP_STORE_FILE = "_sessions.json"
+_FP_STORE_TTL_SECONDS = 30 * 24 * 3600  # prune keyless entries after 30 days
+
+
+def _strip_latest_user(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """The conversation prefix used for fingerprint lookup: everything
+    before the latest user message (the prompt being answered this turn)."""
+    for i in range(len(messages) - 1, -1, -1):
+        if messages[i].get("role") == "user":
+            return list(messages[:i])
+    return list(messages)
+
+
+def _history_fingerprint(messages: List[Dict[str, Any]]) -> str:
+    """Stable identity for a conversation prefix. Normalizes to
+    (role, stripped text) pairs of user/assistant messages so cosmetic
+    differences (content-parts vs plain string, surrounding whitespace)
+    don't change the hash. An edited or regenerated message legitimately
+    changes it — that chat gets one cold replay and re-registers."""
+    parts: List[str] = []
+    for m in messages:
+        role = m.get("role")
+        if role not in ("user", "assistant"):
+            continue
+        text = _message_text(m).strip()
+        if text:
+            parts.append(f"{role}\n{text}")
+    return hashlib.sha256("\x00".join(parts).encode("utf-8")).hexdigest()
+
+
+# The hash of an all-empty normalization (no messages, or none that survive
+# normalization). Every brand-new keyless chat's first-turn lookup collapses
+# to this same key, so a turn must never be allowed to *register* under it —
+# doing so would let one chat's fingerprint store entry answer for every
+# other unrelated new chat.
+_EMPTY_FP = _history_fingerprint([])
+
+
+def _session_meta_path(workdir_root: str, chat_id: str) -> Path:
+    """Lives in a shared `.sessions/` dot-directory directly under
+    WORKDIR_ROOT — never inside a chat's own workdir (or, in PR2, a repo
+    checkout's cwd). `_snapshot_artifacts`/`_inline_new_artifacts` walk the
+    chat workdir looking for downloadable files, and `.json` is one of the
+    extensions they pick up; a meta file living alongside a chat's work
+    would get uploaded as a `.session.json` artifact and linked with a 📎
+    every keyed turn."""
+    return Path(workdir_root) / ".sessions" / f"{chat_id}.json"
+
+
+def _load_session_meta(workdir_root: str, chat_id: str) -> Dict[str, Any]:
+    """Per-chat session metadata ({"session_id": …, "cwd": …}). Missing or
+    corrupt → {}: the turn just falls back to history replay."""
+    try:
+        data = json.loads(
+            _session_meta_path(workdir_root, chat_id).read_text("utf-8")
+        )
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_session_meta(
+    workdir_root: str, chat_id: str, meta: Dict[str, Any]
+) -> None:
+    """Atomic write (tmp + replace) so a crash mid-write can't leave a
+    half-JSON file that would poison every later turn."""
+    path = _session_meta_path(workdir_root, chat_id)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(meta), "utf-8")
+        tmp.replace(path)
+    except OSError:
+        logging.getLogger(__name__).warning("could not persist session meta for %s", chat_id, exc_info=True)
+
+
+def _fp_store_path(workdir_root: str) -> Path:
+    return Path(workdir_root) / _FP_STORE_FILE
+
+
+def _load_fp_store(workdir_root: str) -> Dict[str, Dict[str, Any]]:
+    """fingerprint → {"session_id", "workdir", "cwd", "ts"}. Missing or
+    corrupt → {}. Entries older than the TTL are pruned on load."""
+    try:
+        data = json.loads(_fp_store_path(workdir_root).read_text("utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    cutoff = time.time() - _FP_STORE_TTL_SECONDS
+    return {
+        k: v
+        for k, v in data.items()
+        if isinstance(v, dict) and v.get("ts", 0) >= cutoff
+    }
+
+
+def _save_fp_store(workdir_root: str, store: Dict[str, Dict[str, Any]]) -> None:
+    path = _fp_store_path(workdir_root)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(store), "utf-8")
+        tmp.replace(path)
+    except OSError:
+        logging.getLogger(__name__).warning("could not persist keyless session store", exc_info=True)
 
 
 from claude_agent_sdk import (
@@ -1047,22 +1182,6 @@ def _needs_agent(prompt: str, files: Optional[List[Any]]) -> bool:
     return False
 
 
-def _message_text(message: Dict[str, Any]) -> str:
-    """Plain text of one OpenAI-shape message (string or content-parts list).
-    Non-text parts (image_url, …) are skipped."""
-    content = message.get("content")
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        texts = [
-            part.get("text", "")
-            for part in content
-            if isinstance(part, dict) and part.get("type") == "text"
-        ]
-        return "\n".join(t for t in texts if t)
-    return ""
-
-
 def _extract_latest_user_prompt(body: Dict[str, Any]) -> str:
     messages = body.get("messages") or []
     for message in reversed(messages):
@@ -1727,20 +1846,50 @@ class Pipe:
         event_hits: List[str] = []
         emitter = _redacting_emitter(__event_emitter__, event_hits)
 
+        turn_info: Dict[str, Any] = {}
+        emitted_parts: List[str] = []
+
         # No try/finally around this loop: flushing from a `finally` would mean
         # yielding during GeneratorExit if the client disconnects mid-stream,
         # which raises RuntimeError. Dropping a held tail on an aborted stream
         # is the safe direction — it withholds text rather than emitting it.
         async for chunk in self._pipe_stream(
-            body, __chat_id__, emitter, __files__, __user__, __metadata__
+            body, __chat_id__, emitter, __files__, __user__, __metadata__,
+            turn_info=turn_info,
         ):
             safe = redactor.feed(chunk)
             if safe:
+                if not __chat_id__:
+                    emitted_parts.append(safe)
                 yield safe
 
         tail = redactor.flush()
         if tail:
+            if not __chat_id__:
+                emitted_parts.append(tail)
             yield tail
+
+        # Keyless turn finished cleanly → register its post-turn fingerprint
+        # so the NEXT call (whose prefix is this history + this reply) resumes
+        # warm. If redaction fired, the client-stored text differs from what
+        # the agent produced — the next lookup misses and replays once; safe.
+        if not __chat_id__ and turn_info.get("session_id"):
+            store = _load_fp_store(self.valves.WORKDIR_ROOT)
+            fp = _history_fingerprint(
+                (body.get("messages") or [])
+                + [{"role": "assistant", "content": "".join(emitted_parts)}]
+            )
+            # An all-empty normalization must never claim the shared
+            # empty-prefix hash that every brand-new keyless chat's cold
+            # lookup collides on.
+            if fp != _EMPTY_FP:
+                store[fp] = {
+                    "session_id": turn_info["session_id"],
+                    "workdir": turn_info["workdir"],
+                    "cwd": turn_info["workdir"],
+                    "ts": time.time(),
+                }
+                _save_fp_store(self.valves.WORKDIR_ROOT, store)
 
         hits = redactor.hits + event_hits
         if hits:
@@ -1760,6 +1909,9 @@ class Pipe:
         __files__: Optional[List[Dict[str, Any]]] = None,
         __user__: Optional[Dict[str, Any]] = None,
         __metadata__: Optional[Dict[str, Any]] = None,
+        *,
+        turn_info: Optional[Dict[str, Any]] = None,
+        _no_resume: bool = False,
     ) -> AsyncGenerator[str, None]:
         # Auth selection:
         #   1. If CLAUDE_CODE_OAUTH_TOKEN valve is set → use subscription.
@@ -1789,21 +1941,56 @@ class Pipe:
 
         # Keyless callers (no __chat_id__ — generic OpenAI-API clients such
         # as Conduit or voice integrations don't send OWUI's proprietary
-        # top-level `chat_id` field) run STATELESS: they never read or write
-        # the shared session map (previously they all collided on one
-        # "default" entry and blended contexts), never resume, and instead
-        # replay the full body["messages"] history as a transcript each call.
+        # top-level `chat_id` field) get session identity from a fingerprint
+        # of the conversation prefix rather than from chat_id — see the
+        # block below. A cold start (first turn, or a fingerprint miss: new
+        # chat, edited message, pruned entry) replays the full
+        # body["messages"] history as a transcript once, then resumes warm.
         # Keyed callers (native UI) keep session resume; on a cold start
         # (map entry lost, e.g. after an OWUI restart) they too replay
         # history once, then resume warm from the new session.
         chat_id = __chat_id__ or None
-        workdir = Path(self.valves.WORKDIR_ROOT) / (chat_id or "default")
+        # Keyless callers (Conduit, generic OpenAI-API clients) get session
+        # identity by fingerprinting the conversation prefix. Hit → resume
+        # that session in its own workdir (warm, tool results intact).
+        # Miss (new chat, edited message) → fresh uuid workdir, replay once,
+        # register after the turn. This also retires the old shared
+        # "default" workdir where all keyless chats collided.
+        fp_entry: Optional[Dict[str, Any]] = None
+        if chat_id:
+            workdir = Path(self.valves.WORKDIR_ROOT) / chat_id
+        else:
+            fp_entry = _load_fp_store(self.valves.WORKDIR_ROOT).get(
+                _history_fingerprint(
+                    _strip_latest_user(body.get("messages") or [])
+                )
+            )
+            if fp_entry and not fp_entry.get("workdir"):
+                # Malformed/partial entry — treat as a miss rather than
+                # trusting a workdir (or session_id) that isn't there.
+                fp_entry = None
+            if fp_entry:
+                workdir = Path(fp_entry["workdir"])
+            else:
+                workdir = (
+                    Path(self.valves.WORKDIR_ROOT)
+                    / f"anon-{uuid.uuid4().hex[:12]}"
+                )
         workdir.mkdir(parents=True, exist_ok=True)
 
         allowed_tools = [
             t.strip() for t in self.valves.ALLOWED_TOOLS.split(",") if t.strip()
         ]
-        resume_id = _chat_sessions.get(chat_id) if chat_id else None
+        # In-process map is a cache; the meta file survives OWUI restarts,
+        # pipe redeploys, and valve edits.
+        resume_id: Optional[str] = None
+        if not _no_resume:
+            if chat_id:
+                resume_id = _chat_sessions.get(chat_id) or _load_session_meta(
+                    self.valves.WORKDIR_ROOT, chat_id
+                ).get("session_id")
+            elif fp_entry:
+                resume_id = fp_entry.get("session_id")
 
         # Image attachments on the latest user message: OWUI delivers them as
         # image_url content parts, which the text-only prompt extraction
@@ -1918,6 +2105,10 @@ class Pipe:
             if heartbeat_task is None or heartbeat_task.done():
                 heartbeat_task = asyncio.create_task(_heartbeat())
 
+        # Session id delivered by this turn's init message (keyed AND keyless
+        # callers) — consumed by keyless registration and resume-retry.
+        turn_session_id: Optional[str] = None
+
         try:
             async with ClaudeSDKClient(options=options) as client:
                 await client.query(prompt)
@@ -1925,10 +2116,18 @@ class Pipe:
                     if isinstance(message, SystemMessage):
                         if message.subtype == "init":
                             session_id = message.data.get("session_id")
-                            # Keyless callers are stateless by design — never
-                            # store their session under a shared key.
-                            if session_id and chat_id:
-                                _chat_sessions[chat_id] = session_id
+                            if session_id:
+                                turn_session_id = session_id
+                                if chat_id:
+                                    _chat_sessions[chat_id] = session_id
+                                    _save_session_meta(
+                                        self.valves.WORKDIR_ROOT,
+                                        chat_id,
+                                        {
+                                            "session_id": session_id,
+                                            "cwd": str(workdir),
+                                        },
+                                    )
                         continue
 
                     if isinstance(message, StreamEvent):
@@ -1997,11 +2196,11 @@ class Pipe:
                                     f" · {preview}" if preview else ""
                                 )
                                 if self.valves.INLINE_TOOL_DETAILS:
-                                    body = _tool_input_block(block.name, block.input)
+                                    tool_body = _tool_input_block(block.name, block.input)
                                     yield (
                                         "\n\n<details>\n"
                                         f"<summary>{summary_text}</summary>\n\n"
-                                        f"{body}\n\n"
+                                        f"{tool_body}\n\n"
                                         "</details>\n\n"
                                     )
                         continue
@@ -2043,6 +2242,9 @@ class Pipe:
                             yield f"\n\n_Agent stopped: {message.subtype}_\n"
                         # Cost footer removed: subscription billing makes it
                         # noise, and TTS reads it aloud in call mode.
+                        if turn_info is not None and turn_session_id:
+                            turn_info["session_id"] = turn_session_id
+                            turn_info["workdir"] = str(workdir)
                         return
 
         except CLIJSONDecodeError:
@@ -2057,6 +2259,25 @@ class Pipe:
                 "smaller file.\n"
             )
         except Exception as exc:
+            if resume_id and turn_session_id is None:
+                # Resume died before the session came up. Drop the stale id
+                # and rerun this turn cold — _render_transcript replays the
+                # history, and the new session id gets persisted on init.
+                log.warning(
+                    "resume of %s failed (%s: %s); retrying cold",
+                    resume_id, type(exc).__name__, exc,
+                )
+                if chat_id:
+                    _chat_sessions.pop(chat_id, None)
+                    _save_session_meta(self.valves.WORKDIR_ROOT, chat_id, {})
+                await emit_status("Session expired — replaying history…")
+                async for chunk in self._pipe_stream(
+                    body, __chat_id__, __event_emitter__, __files__,
+                    __user__, __metadata__,
+                    turn_info=turn_info, _no_resume=True,
+                ):
+                    yield chunk
+                return
             log.exception("Claude Agent SDK pipe failed")
             await emit_status(f"Error: {exc}", done=True)
             yield f"\n\n**Claude Code error:** `{type(exc).__name__}: {exc}`\n"
