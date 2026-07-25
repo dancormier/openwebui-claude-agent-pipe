@@ -119,6 +119,14 @@ check("no prefix", extract_repo("plain question"), (None, "plain question"))
 check("mid-text not a prefix", extract_repo("see #repo:x docs"),
       (None, "see #repo:x docs"))
 
+# ── model resolution (PR 3) ────────────────────────────────────────────────
+resolve = mod._model_from_requested
+check("suffixed id wins", resolve("claude_code.claude-code-claude-fable-5", "claude-opus-5"),
+      "claude-fable-5")
+check("base id falls through", resolve("claude_code.claude-code", "claude-opus-5"),
+      "claude-opus-5")
+check("empty falls through", resolve("", "claude-opus-5"), "claude-opus-5")
+
 if fails:
     print(f"FAIL ({len(fails)})")
     for f in fails:

@@ -1,7 +1,7 @@
 # Claude Code pipe (installed copy)
 
 The Open WebUI pipe function running as `claude_code`, kept here for durability.
-Base: [tfriedel/openwebui-claude-code](https://github.com/tfriedel/openwebui-claude-code) commit `5bbc1fc` + 6 local patches:
+Base: [tfriedel/openwebui-claude-code](https://github.com/tfriedel/openwebui-claude-code) commit `5bbc1fc` + 11 local patches:
 
 1. **no-KB crash fix** — `_build_kb_mcp_server` returned a 2-tuple on the
    no-knowledge path; callers unpack 3 (`return None, [], {}`). Not filed upstream (Dan's call).
@@ -19,7 +19,7 @@ Base: [tfriedel/openwebui-claude-code](https://github.com/tfriedel/openwebui-cla
 6. **No cost footer** — the per-response cost/usage line is dropped; subscription
    billing makes it noise, and TTS reads it aloud in call mode.
 7. **Durable sessions** — chat_id → session_id persisted to
-   `WORKDIR_ROOT/<chat_id>/.session.json`; survives OWUI restarts and
+   `WORKDIR_ROOT/.sessions/<chat_id>.json`; survives OWUI restarts and
    redeploys. In-process map is now only a cache.
 8. **Keyless warm sessions** — callers without chat_id (Conduit) get session
    identity via a conversation-prefix fingerprint stored in
@@ -30,6 +30,14 @@ Base: [tfriedel/openwebui-claude-code](https://github.com/tfriedel/openwebui-cla
    chat in an allowlisted repo (`REPO_MAP` valve) instead of the scratch
    workdir, loading that repo's CLAUDE.md. Session metadata stays under
    `WORKDIR_ROOT`.
+10. **Session-mode status** — each turn surfaces `Session: resumed` /
+    `cold start — history replayed` / `new chat`, so degradation is visible.
+11. **Mobile concision hint** — keyless callers get a system-prompt append
+    steering toward short answers.
+
+Note: repo-rooted chats (#repo:) don't surface files created in the repo cwd as chat attachments — the artifact scanner deliberately walks only the scratch workdir and /tmp.
+
+Note: Hook verification: `scripts/verify-pipe-hooks.sh` (run on the Mini) proves the deny-secret-exfil PreToolUse hook fires for pipe-like headless runs.
 
 To redeploy after editing: update the function content via the admin API
 (see vault: Projects/Revised home AI hub plan/Implementation Plan, Task 3.2)

@@ -198,7 +198,6 @@ def _message_text(message: Dict[str, Any]) -> str:
 # OpenAI-API clients, which send no chat_id). Files hold session ids and
 # paths only — never credentials.
 
-_SESSION_META_FILE = ".session.json"
 _FP_STORE_FILE = "_sessions.json"
 _FP_STORE_TTL_SECONDS = 30 * 24 * 3600  # prune keyless entries after 30 days
 
@@ -331,6 +330,16 @@ def _extract_repo_prefix(prompt: str) -> Tuple[Optional[str], str]:
     if not m:
         return None, prompt
     return m.group(1), prompt.lstrip()[m.end():]
+
+
+def _model_from_requested(requested: str, default: str) -> str:
+    """Map an invoked OpenWebUI model id back to a Claude model ID. Extra
+    picker entries carry the model in their suffix ("…claude-code-<model>");
+    everything else falls through to the default (MODEL valve)."""
+    marker = "claude-code-"
+    if marker in requested:
+        return requested.split(marker, 1)[1]
+    return default
 
 
 from claude_agent_sdk import (
@@ -1464,16 +1473,9 @@ class Pipe:
         return entries
 
     def _resolve_model(self, body: Optional[Dict[str, Any]]) -> str:
-        """Map the invoked OpenWebUI model id back to a Claude model ID.
-
-        Extra entries from the MODELS valve carry the Claude model in their
-        id suffix ("<fn_id>.claude-code-<model>"); the base "claude-code"
-        entry falls through to the MODEL valve."""
-        requested = str((body or {}).get("model") or "")
-        marker = "claude-code-"
-        if marker in requested:
-            return requested.split(marker, 1)[1]
-        return self.valves.MODEL
+        return _model_from_requested(
+            str((body or {}).get("model") or ""), self.valves.MODEL
+        )
 
     async def _run_fast(
         self,
@@ -2126,12 +2128,24 @@ class Pipe:
         # Extend Claude Code's default agent-loop system prompt with whatever
         # the Workspace Model configured. `append` keeps the agentic prompt
         # intact while adding domain persona/rules on top.
+        append_parts: List[str] = []
         system_prompt = _extract_system_prompt(body)
         if system_prompt:
+            append_parts.append(system_prompt)
+        if not chat_id:
+            # Keyless callers are mobile/voice surfaces (Conduit): small
+            # screens, often TTS. Nudge hard toward brevity.
+            append_parts.append(
+                "Surface note: this reply may render on a small mobile "
+                "screen. Answer as concisely as correctness allows — lead "
+                "with the answer, no headers unless essential, no trailing "
+                "recap."
+            )
+        if append_parts:
             options_kwargs["system_prompt"] = {
                 "type": "preset",
                 "preset": "claude_code",
-                "append": system_prompt,
+                "append": "\n\n".join(append_parts),
             }
 
         options = ClaudeAgentOptions(**options_kwargs)
@@ -2212,6 +2226,17 @@ class Pipe:
                                             "cwd": str(cwd),
                                         },
                                     )
+                            history = _strip_latest_user(
+                                body.get("messages") or []
+                            )
+                            if resume_id:
+                                await emit_status("Session: resumed")
+                            elif _history_fingerprint(history) != _EMPTY_FP:
+                                await emit_status(
+                                    "Session: cold start — history replayed"
+                                )
+                            else:
+                                await emit_status("Session: new chat")
                         continue
 
                     if isinstance(message, StreamEvent):
