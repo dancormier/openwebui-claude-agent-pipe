@@ -45,6 +45,133 @@ _ARTIFACT_EXTENSIONS = _IMAGE_EXTENSIONS | _DOWNLOAD_EXTENSIONS
 # when large — this is only a "don't accidentally ship a DVD ISO" guard.
 _MAX_ARTIFACT_BYTES = 50 * 1024 * 1024  # 50 MiB
 
+# ── Secret redaction ────────────────────────────────────────────────────────
+# Everything this pipe emits is persisted in webui.db chat history and synced
+# to mobile clients, so a secret that reaches the stream is a secret on disk
+# indefinitely. Redaction lives here — at the pipe's own output boundary —
+# rather than in any single tool, because the agent runs under
+# bypassPermissions and can read a credential through paths nobody enumerated
+# in advance (a `cat`, a `sqlite3 SELECT *`, an env dump, a stack trace).
+# Guarding individual tools is opt-in and fails open when a new path appears;
+# guarding the boundary fails closed regardless of source.
+#
+# Patterns are prefix-anchored on purpose: a token's fixed prefix plus a
+# length floor is specific enough that false positives are rare, and the
+# failure mode of over-matching (a redacted non-secret) is far cheaper than
+# under-matching (a rotation).
+_SECRET_PATTERNS: List[tuple] = [
+    ("anthropic-token", re.compile(r"sk-ant-[A-Za-z0-9_\-]{16,}")),
+    ("openai-key", re.compile(r"sk-(?:proj-)?[A-Za-z0-9]{32,}")),
+    ("slack-token", re.compile(r"xox[baprse]-[A-Za-z0-9\-]{10,}")),
+    ("github-token", re.compile(r"gh[pousr]_[A-Za-z0-9]{20,}")),
+    ("github-pat", re.compile(r"github_pat_[A-Za-z0-9_]{20,}")),
+    ("aws-access-key", re.compile(r"AKIA[0-9A-Z]{16}")),
+    ("google-api-key", re.compile(r"AIza[0-9A-Za-z_\-]{35}")),
+    ("jwt", re.compile(r"eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}")),
+    ("private-key", re.compile(r"-----BEGIN[A-Z ]*PRIVATE KEY-----")),
+]
+
+# A secret split across two stream chunks defeats a per-chunk regex, so the
+# redactor holds back any tail that could still grow into a match. These
+# match a *truncated* secret anchored at end-of-buffer; the held tail is
+# released once the next chunk proves it harmless.
+_SECRET_TAIL_RX = re.compile(
+    r"(?:"
+    r"s|sk|sk-|sk-a(?:n(?:t(?:-[A-Za-z0-9_\-]*)?)?)?|sk-(?:proj-?)?[A-Za-z0-9]*"
+    r"|x|xo|xox|xox[baprse](?:-[A-Za-z0-9\-]*)?"
+    r"|g|gh|gh[pousr](?:_[A-Za-z0-9]*)?|github(?:_(?:p(?:a(?:t(?:_[A-Za-z0-9_]*)?)?)?)?)?"
+    r"|A|AK|AKI|AKIA[0-9A-Z]*|AI|AIz|AIza[0-9A-Za-z_\-]*"
+    r"|e|ey|eyJ[A-Za-z0-9_\-]*(?:\.[A-Za-z0-9_\-]*){0,2}"
+    r"|-{1,5}(?:BEGIN[A-Z ]*)?"
+    r")\Z"
+)
+
+# Upper bound on the held-back tail. Every pattern above tops out well under
+# this; past it the tail cannot be a prefix of any match we recognise, so
+# holding more would stall output for nothing.
+_MAX_HELD_TAIL = 512
+
+
+def _redact_secrets(text: str) -> tuple:
+    """Replace complete secrets in `text`. Returns (clean_text, hit_labels)."""
+    if not text:
+        return text, []
+    hits: List[str] = []
+    for label, rx in _SECRET_PATTERNS:
+        text, n = rx.subn(f"«redacted:{label}»", text)
+        if n:
+            hits.extend([label] * n)
+    return text, hits
+
+
+class _StreamRedactor:
+    """Chunk-boundary-safe secret scrubber for a single response stream.
+
+    `feed()` returns the portion of the stream that is safe to emit now,
+    withholding any trailing fragment that could still become a secret once
+    more text arrives. `flush()` releases whatever is left at end of stream.
+    """
+
+    def __init__(self) -> None:
+        self._held = ""
+        self.hits: List[str] = []
+
+    def feed(self, chunk: str) -> str:
+        if not chunk:
+            return ""
+        buf = self._held + chunk
+        # Split off the still-growing tail BEFORE redacting. Redacting first
+        # would fire on a partially-arrived secret the moment it cleared the
+        # pattern's length floor, releasing the rest of it verbatim as the
+        # remaining characters streamed in.
+        tail = _SECRET_TAIL_RX.search(buf)
+        if tail and len(buf) - tail.start() <= _MAX_HELD_TAIL:
+            self._held = buf[tail.start() :]
+            buf = buf[: tail.start()]
+        else:
+            self._held = ""
+        safe, hits = _redact_secrets(buf)
+        self.hits.extend(hits)
+        return safe
+
+    def flush(self) -> str:
+        out, hits = _redact_secrets(self._held)
+        self.hits.extend(hits)
+        self._held = ""
+        return out
+
+
+def _redact_event(value: Any, hits: List[str]) -> Any:
+    """Recursively scrub secrets from an event payload.
+
+    Status descriptions carry tool previews and error text, so they leak the
+    same way response text does. Events arrive whole rather than streamed, so
+    no held-tail machinery is needed here.
+    """
+    if isinstance(value, str):
+        clean, found = _redact_secrets(value)
+        hits.extend(found)
+        return clean
+    if isinstance(value, dict):
+        return {k: _redact_event(v, hits) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_redact_event(v, hits) for v in value]
+    return value
+
+
+def _redacting_emitter(
+    emitter: Optional[Callable], hits: List[str]
+) -> Optional[Callable]:
+    """Wrap an OpenWebUI event emitter so every payload is scrubbed first."""
+    if emitter is None:
+        return None
+
+    async def _emit(event: Any) -> Any:
+        return await emitter(_redact_event(event, hits))
+
+    return _emit
+
+
 from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
@@ -1580,6 +1707,52 @@ class Pipe:
             yield f"\n\n**Fast-path error:** `{type(exc).__name__}: {exc}`\n"
 
     async def pipe(
+        self,
+        body: Dict[str, Any],
+        __chat_id__: Optional[str] = None,
+        __event_emitter__: Optional[Callable] = None,
+        __files__: Optional[List[Dict[str, Any]]] = None,
+        __user__: Optional[Dict[str, Any]] = None,
+        __metadata__: Optional[Dict[str, Any]] = None,
+    ) -> AsyncGenerator[str, None]:
+        """Public entrypoint. Scrubs secrets from everything leaving the pipe.
+
+        Kept as a thin wrapper around `_pipe_stream` so the redaction can't be
+        bypassed by a future `yield` added inside the agent loop: both the
+        response stream and the status/event channel pass through here.
+        OpenWebUI injects the dunder arguments by signature inspection, so
+        this wrapper must keep the original parameter list verbatim.
+        """
+        redactor = _StreamRedactor()
+        event_hits: List[str] = []
+        emitter = _redacting_emitter(__event_emitter__, event_hits)
+
+        # No try/finally around this loop: flushing from a `finally` would mean
+        # yielding during GeneratorExit if the client disconnects mid-stream,
+        # which raises RuntimeError. Dropping a held tail on an aborted stream
+        # is the safe direction — it withholds text rather than emitting it.
+        async for chunk in self._pipe_stream(
+            body, __chat_id__, emitter, __files__, __user__, __metadata__
+        ):
+            safe = redactor.feed(chunk)
+            if safe:
+                yield safe
+
+        tail = redactor.flush()
+        if tail:
+            yield tail
+
+        hits = redactor.hits + event_hits
+        if hits:
+            # Log the kinds, never the values. A hit means something read a
+            # credential into the response path — worth a rotation decision
+            # even though the value never reached the chat DB.
+            log.warning(
+                "pipe output redaction fired: %s",
+                ", ".join(f"{k}×{hits.count(k)}" for k in sorted(set(hits))),
+            )
+
+    async def _pipe_stream(
         self,
         body: Dict[str, Any],
         __chat_id__: Optional[str] = None,
