@@ -19,7 +19,7 @@ import time
 import urllib.request
 import uuid
 from pathlib import Path
-from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Set
+from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Set, Tuple
 
 from pydantic import BaseModel, Field
 
@@ -305,6 +305,32 @@ def _save_fp_store(workdir_root: str, store: Dict[str, Dict[str, Any]]) -> None:
         tmp.replace(path)
     except OSError:
         logging.getLogger(__name__).warning("could not persist keyless session store", exc_info=True)
+
+
+# ── Repo-aware workdir ──────────────────────────────────────────────────────
+
+_REPO_PREFIX_RX = re.compile(r"^#repo:([A-Za-z0-9][\w-]*)\s*", re.ASCII)
+
+
+def _parse_repo_map(raw: str) -> Dict[str, str]:
+    """REPO_MAP valve: comma-separated name=path allowlist. Malformed
+    entries are dropped — a typo must not widen where chats can run."""
+    out: Dict[str, str] = {}
+    for pair in raw.split(","):
+        name, sep, path = pair.partition("=")
+        name, path = name.strip(), path.strip()
+        if sep and name and path:
+            out[name] = path
+    return out
+
+
+def _extract_repo_prefix(prompt: str) -> Tuple[Optional[str], str]:
+    """`#repo:<name>` at the very start of a message selects the chat's
+    working repo. Returns (name or None, prompt with the prefix removed)."""
+    m = _REPO_PREFIX_RX.match(prompt.lstrip())
+    if not m:
+        return None, prompt
+    return m.group(1), prompt.lstrip()[m.end():]
 
 
 from claude_agent_sdk import (
@@ -1414,6 +1440,19 @@ class Pipe:
                 "trust and control. Avoid on multi-user/public deployments."
             ),
         )
+        REPO_MAP: str = Field(
+            default="",
+            description=(
+                "Comma-separated name=path allowlist of repos a chat may run "
+                "in, e.g. homelab=/Users/dc-homeserver/homelab,"
+                "vault=/Users/dc-homeserver/Obsidian/personal. Start a chat's "
+                "FIRST message with #repo:<name> to set its cwd to that path "
+                "for the whole chat (loads the repo's CLAUDE.md via the "
+                "project setting source). Unknown names error in-chat. Empty "
+                "disables the feature. Grants nothing new — bypassPermissions "
+                "already reaches these paths; this only controls cwd."
+            ),
+        )
 
     def __init__(self) -> None:
         self.valves = self.Valves()
@@ -1886,7 +1925,7 @@ class Pipe:
                 store[fp] = {
                     "session_id": turn_info["session_id"],
                     "workdir": turn_info["workdir"],
-                    "cwd": turn_info["workdir"],
+                    "cwd": turn_info.get("cwd") or turn_info["workdir"],
                     "ts": time.time(),
                 }
                 _save_fp_store(self.valves.WORKDIR_ROOT, store)
@@ -1938,6 +1977,7 @@ class Pipe:
 
         # Fast path disabled — always run the full agent loop.
         prompt = _strip_mode_prefix(prompt)
+        repo_name, prompt = _extract_repo_prefix(prompt)
 
         # Keyless callers (no __chat_id__ — generic OpenAI-API clients such
         # as Conduit or voice integrations don't send OWUI's proprietary
@@ -1978,6 +2018,50 @@ class Pipe:
                 )
         workdir.mkdir(parents=True, exist_ok=True)
 
+        # cwd: persisted repo choice wins; else an explicit #repo: prefix on
+        # a fresh session; else the scratch workdir. Metadata lives under
+        # WORKDIR_ROOT regardless — never inside a repo.
+        repo_map = _parse_repo_map(self.valves.REPO_MAP)
+        cwd = Path(
+            (
+                _load_session_meta(self.valves.WORKDIR_ROOT, chat_id).get("cwd")
+                if chat_id
+                else (fp_entry or {}).get("cwd")
+            )
+            or workdir
+        )
+        if repo_name is not None:
+            if repo_name not in repo_map:
+                allowed = ", ".join(sorted(repo_map)) or "(none configured)"
+                yield (
+                    f"_Unknown repo `{repo_name}`. Allowed: {allowed}._"
+                )
+                return
+            target = Path(repo_map[repo_name])
+            if not target.is_dir():
+                yield f"_Repo path for `{repo_name}` does not exist on the host._"
+                return
+            if chat_id:
+                has_session = bool(
+                    _chat_sessions.get(chat_id)
+                    or _load_session_meta(self.valves.WORKDIR_ROOT, chat_id).get(
+                        "session_id"
+                    )
+                )
+            else:
+                has_session = bool(fp_entry and fp_entry.get("session_id"))
+            if has_session and cwd != target:
+                # A live session already exists for this chat; Claude Code
+                # sessions are per-directory, so switching mid-chat can't
+                # resume. Tell the user instead of silently degrading.
+                yield (
+                    "_This chat already runs in another directory; `#repo:` "
+                    "only takes effect on a chat's first message. Start a "
+                    "new chat._"
+                )
+                return
+            cwd = target
+
         allowed_tools = [
             t.strip() for t in self.valves.ALLOWED_TOOLS.split(",") if t.strip()
         ]
@@ -2015,7 +2099,7 @@ class Pipe:
         allowed_tools = allowed_tools + kb_tool_names
 
         options_kwargs: Dict[str, Any] = {
-            "cwd": str(workdir),
+            "cwd": str(cwd),
             "model": self._resolve_model(body),
             "permission_mode": self.valves.PERMISSION_MODE,
             "allowed_tools": allowed_tools,
@@ -2125,7 +2209,7 @@ class Pipe:
                                         chat_id,
                                         {
                                             "session_id": session_id,
-                                            "cwd": str(workdir),
+                                            "cwd": str(cwd),
                                         },
                                     )
                         continue
@@ -2245,6 +2329,7 @@ class Pipe:
                         if turn_info is not None and turn_session_id:
                             turn_info["session_id"] = turn_session_id
                             turn_info["workdir"] = str(workdir)
+                            turn_info["cwd"] = str(cwd)
                         return
 
         except CLIJSONDecodeError:
@@ -2269,7 +2354,9 @@ class Pipe:
                 )
                 if chat_id:
                     _chat_sessions.pop(chat_id, None)
-                    _save_session_meta(self.valves.WORKDIR_ROOT, chat_id, {})
+                    _save_session_meta(
+                        self.valves.WORKDIR_ROOT, chat_id, {"cwd": str(cwd)}
+                    )
                 await emit_status("Session expired — replaying history…")
                 async for chunk in self._pipe_stream(
                     body, __chat_id__, __event_emitter__, __files__,

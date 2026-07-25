@@ -26,6 +26,10 @@ Base: [tfriedel/openwebui-claude-code](https://github.com/tfriedel/openwebui-cla
    `WORKDIR_ROOT/_sessions.json`; each keyless chat gets its own
    `anon-<uuid>` workdir (shared `default` retired). Dead resume ids retry
    the turn cold once.
+9. **Repo-aware workdir** — `#repo:<name>` on a chat's first message runs the
+   chat in an allowlisted repo (`REPO_MAP` valve) instead of the scratch
+   workdir, loading that repo's CLAUDE.md. Session metadata stays under
+   `WORKDIR_ROOT`.
 
 To redeploy after editing: update the function content via the admin API
 (see vault: Projects/Revised home AI hub plan/Implementation Plan, Task 3.2)

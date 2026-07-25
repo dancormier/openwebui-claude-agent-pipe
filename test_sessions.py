@@ -100,6 +100,25 @@ with tempfile.TemporaryDirectory() as root:
     (pathlib.Path(root) / mod._FP_STORE_FILE).write_text("not json")
     check("corrupt store → {}", mod._load_fp_store(root), {})
 
+# ── repo map (PR 2) ────────────────────────────────────────────────────────
+parse_map = mod._parse_repo_map
+extract_repo = mod._extract_repo_prefix
+
+check(
+    "map parses",
+    parse_map("homelab=/Users/x/homelab, vault=/Users/x/Obsidian/personal"),
+    {"homelab": "/Users/x/homelab", "vault": "/Users/x/Obsidian/personal"},
+)
+check("map empty", parse_map(""), {})
+check("map junk dropped", parse_map("nopath,=x, =,a=b"), {"a": "b"})
+
+check("prefix extracted", extract_repo("#repo:homelab fix the daemon"),
+      ("homelab", "fix the daemon"))
+check("prefix alone", extract_repo("#repo:vault"), ("vault", ""))
+check("no prefix", extract_repo("plain question"), (None, "plain question"))
+check("mid-text not a prefix", extract_repo("see #repo:x docs"),
+      (None, "see #repo:x docs"))
+
 if fails:
     print(f"FAIL ({len(fails)})")
     for f in fails:
