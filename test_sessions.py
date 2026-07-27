@@ -139,6 +139,93 @@ check("chat id becomes HUB_CHAT_ID",
 check("no chat id yields no key at all", _agent_env(None), {})
 check("empty chat id yields no key at all", _agent_env(""), {})
 
+# ── gateway contract for repo-rooted sessions ──────────────────────────────
+# A #repo: session's cwd is the mapped repo, so the SDK loads that repo's
+# CLAUDE.md and never reads hub/AGENTS.md — which is how #repo:homelab ran with
+# no Hard Rules at all under bypassPermissions until 2026-07-27. The pipe now
+# appends the contract itself whenever the agent is rooted outside WORKDIR_ROOT.
+_gateway_contract = mod._gateway_contract
+
+_root = tempfile.mkdtemp()
+_contract = pathlib.Path(_root) / "AGENTS.md"
+_contract.write_text("# Hub contract\n\nHard Rules go here.\n", encoding="utf-8")
+_workdir_root = pathlib.Path(_root) / "hub"
+(_workdir_root / "chat-abc").mkdir(parents=True)
+_repo = pathlib.Path(_root) / "homelab"
+_repo.mkdir()
+
+
+def sent(text):
+    """The contract body, ignoring the injected framing preamble."""
+    return text.split("\n\n", 1)[1] if text else text
+
+
+# Repo-rooted: the agent cannot reach the contract from its cwd, so send it.
+check("repo cwd gets the contract",
+      sent(_gateway_contract(str(_repo), str(_workdir_root), str(_contract))),
+      "# Hub contract\n\nHard Rules go here.\n")
+
+# The framing matters: the contract's own text calls the cwd a scratch
+# workspace, which is false for exactly these sessions, and system-prompt text
+# outranks anything the agent reads off disk.
+_framed = _gateway_contract(str(_repo), str(_workdir_root), str(_contract))
+if str(_repo) not in _framed.split("\n\n", 1)[0]:
+    fails.append("framing preamble does not name the actual cwd")
+if "EXCEPT" not in _framed.split("\n\n", 1)[0]:
+    fails.append("framing preamble does not carve out the stale cwd claims")
+
+# Scratch workdir: ~/hub/CLAUDE.md already points at the contract, so appending
+# it again would duplicate several KB into every single turn.
+check("workdir cwd gets nothing",
+      _gateway_contract(str(_workdir_root / "chat-abc"), str(_workdir_root), str(_contract)),
+      "")
+check("workdir root itself gets nothing",
+      _gateway_contract(str(_workdir_root), str(_workdir_root), str(_contract)), "")
+
+# Fail open on a bad path rather than taking the turn down — a missing contract
+# file must not break chat, but it also must not silently look like success.
+check("missing contract file yields nothing",
+      _gateway_contract(str(_repo), str(_workdir_root), str(pathlib.Path(_root) / "nope.md")),
+      "")
+check("empty workdir root disables the exemption",
+      sent(_gateway_contract(str(_repo), "", str(_contract))),
+      "# Hub contract\n\nHard Rules go here.\n")
+
+# A cwd that merely starts with the same characters is NOT inside the root.
+_sibling = pathlib.Path(str(_workdir_root) + "-other")
+_sibling.mkdir()
+check("prefix-similar sibling path is not inside the root",
+      sent(_gateway_contract(str(_sibling), str(_workdir_root), str(_contract))),
+      "# Hub contract\n\nHard Rules go here.\n")
+
+# Symlinks: the exemption must survive either side being a link. WORKDIR_ROOT
+# defaults under /tmp, which is itself a symlink on macOS, so a startswith
+# implementation would send the contract to every scratch session on a default
+# install. These cases are what make resolve() load-bearing.
+_link_root = pathlib.Path(_root) / "hub-link"
+_link_root.symlink_to(_workdir_root)
+check("cwd reached through a symlinked root is still inside it",
+      _gateway_contract(str(_link_root / "chat-abc"), str(_workdir_root), str(_contract)), "")
+check("root given as a symlink still matches a real cwd",
+      _gateway_contract(str(_workdir_root / "chat-abc"), str(_link_root), str(_contract)), "")
+check("traversal out of the root sends the contract",
+      sent(_gateway_contract(str(_workdir_root / ".." / "homelab"), str(_workdir_root), str(_contract))),
+      "# Hub contract\n\nHard Rules go here.\n")
+check("traversal that stays inside the root sends nothing",
+      _gateway_contract(str(_workdir_root / "chat-abc" / ".."), str(_workdir_root), str(_contract)), "")
+
+# Never raise. A valve typo or a binary file must not take the turn down —
+# UnicodeDecodeError is a ValueError and expanduser() raises RuntimeError on an
+# unknown ~user, so neither is covered by catching OSError alone.
+_binary = pathlib.Path(_root) / "binary.md"
+_binary.write_bytes(b"\xff\xfe not utf-8")
+check("undecodable contract yields nothing instead of raising",
+      _gateway_contract(str(_repo), str(_workdir_root), str(_binary)), "")
+check("unknown ~user in the path yields nothing instead of raising",
+      _gateway_contract(str(_repo), str(_workdir_root), "~nosuchuser42/AGENTS.md"), "")
+check("NUL byte in the path yields nothing instead of raising",
+      _gateway_contract(str(_repo), str(_workdir_root), "/tmp/\x00bad.md"), "")
+
 if fails:
     print(f"FAIL ({len(fails)})")
     for f in fails:

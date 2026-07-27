@@ -342,6 +342,61 @@ def _model_from_requested(requested: str, default: str) -> str:
     return default
 
 
+def _gateway_contract(cwd: str, workdir_root: str, contract_path: str) -> str:
+    """The gateway contract to append when the agent's cwd won't supply it.
+
+    A `#repo:` session runs with cwd set to the mapped repo, so the SDK loads
+    THAT repo's CLAUDE.md and never reads `hub/AGENTS.md`. On 2026-07-27 that
+    meant `#repo:homelab` sessions ran with no response contract, no async
+    rules, and no Hard Rules — under bypassPermissions — because the repo had
+    no root instruction file at all. Adding one per repo fixes the repos we
+    remember; this fixes the class, including the next REPO_MAP entry someone
+    adds without one.
+
+    Returns "" when cwd is inside WORKDIR_ROOT: those sessions already load
+    `<WORKDIR_ROOT>/CLAUDE.md`, and appending several KB to every turn on top
+    of that is pure waste. Pass workdir_root="" to disable that exemption —
+    the caller does exactly that when SETTING_SOURCES would stop the agent
+    loading anything from its cwd at all.
+
+    Never raises. Every failure returns "" or falls through to sending the
+    contract; a bad path or an undecodable file must not take a chat turn
+    down. Note UnicodeDecodeError is a ValueError, and expanduser() raises
+    RuntimeError on an unknown ~user — both reachable from a valve typo.
+    """
+    try:
+        cwd_path = Path(cwd).resolve()
+    except (OSError, ValueError, RuntimeError):
+        return ""
+    if workdir_root:
+        try:
+            root = Path(workdir_root).resolve()
+            # relative_to on RESOLVED paths, not startswith: "<root>-other"
+            # shares a prefix with "<root>" but is a different directory, and
+            # either side may be a symlink (WORKDIR_ROOT defaults under /tmp,
+            # which is itself a symlink on macOS).
+            cwd_path.relative_to(root)
+            return ""
+        except (OSError, ValueError, RuntimeError):
+            pass
+    try:
+        text = Path(contract_path).expanduser().read_text(encoding="utf-8")
+    except (OSError, ValueError, RuntimeError):
+        return ""
+    # Frame it. The contract's own opening describes the cwd as a per-chat
+    # scratch workspace, which is false for exactly the sessions this append
+    # exists to serve — and system-prompt text outranks anything the agent
+    # reads from disk, so an unframed copy would actively mislead.
+    return (
+        f"Gateway contract, injected because this session is rooted at {cwd} "
+        "rather than a per-chat scratch workspace. Everything below applies, "
+        "EXCEPT statements about your working directory being a scratch "
+        "workspace or about which instruction files you load automatically — "
+        "your cwd is a real working tree, and this contract is being supplied "
+        "to you directly.\n\n" + text
+    )
+
+
 def _agent_env(chat_id: Optional[str]) -> Dict[str, str]:
     """Environment additions for the agent's subprocess.
 
@@ -1436,6 +1491,15 @@ class Pipe:
             default="/tmp/claude-agent-pipe",
             description="Root directory for per-chat workspaces. One subdir per chat_id.",
         )
+        GATEWAY_CONTRACT_PATH: str = Field(
+            default="~/homelab/hub/AGENTS.md",
+            description=(
+                "Contract appended to the system prompt when a chat is rooted "
+                "outside WORKDIR_ROOT (a #repo: session), where the agent would "
+                "otherwise load only that repo's CLAUDE.md and never see the "
+                "gateway's Hard Rules. Empty disables the append."
+            ),
+        )
         MAX_TURNS: int = Field(
             default=30,
             description="Maximum agent turns per user message. 0 disables the cap.",
@@ -1772,6 +1836,11 @@ class Pipe:
             "permission_mode": self.valves.PERMISSION_MODE,
             "allowed_tools": kb_tool_names,
             "setting_sources": _parse_setting_sources(self.valves.SETTING_SOURCES),
+            # NOTE: unlike the main loop, this path does not append the
+            # gateway contract (_gateway_contract) — it has no cwd of its own
+            # and is currently unreachable ("Fast path disabled" below). If
+            # routing to it is ever restored, add the append here too, or
+            # repo-rooted sessions lose the Hard Rules again.
             "system_prompt": system_text,
             "include_partial_messages": True,
         }
@@ -2163,6 +2232,27 @@ class Pipe:
         # the Workspace Model configured. `append` keeps the agentic prompt
         # intact while adding domain persona/rules on top.
         append_parts: List[str] = []
+        # The gateway contract goes first so the operator's Workspace-Model
+        # prompt is the LATER text: on a persona/style conflict the operator
+        # wins, which is the precedence we want. (Presence, not position, is
+        # what protects a repo-rooted session — position only decides ties.)
+        if self.valves.GATEWAY_CONTRACT_PATH:
+            # The WORKDIR_ROOT exemption assumes a scratch session loads
+            # <WORKDIR_ROOT>/CLAUDE.md by itself — true only while
+            # SETTING_SOURCES lets it. That valve defaults to "" (load
+            # nothing), so without this check a valve reset would leave every
+            # scratch AND keyless session contractless while repo-rooted ones
+            # stayed covered: the exact inversion of the bug this fixes.
+            loads_from_cwd = "project" in _parse_setting_sources(
+                self.valves.SETTING_SOURCES
+            )
+            contract = _gateway_contract(
+                str(cwd),
+                self.valves.WORKDIR_ROOT if loads_from_cwd else "",
+                self.valves.GATEWAY_CONTRACT_PATH,
+            )
+            if contract:
+                append_parts.append(contract)
         system_prompt = _extract_system_prompt(body)
         if system_prompt:
             append_parts.append(system_prompt)
