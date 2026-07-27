@@ -342,6 +342,25 @@ def _model_from_requested(requested: str, default: str) -> str:
     return default
 
 
+def _agent_env(chat_id: Optional[str]) -> Dict[str, str]:
+    """Environment additions for the agent's subprocess.
+
+    The agent has no other way to learn which chat it is serving: its cwd is a
+    scratch workdir (or, in a #repo: session, a repo that says nothing about
+    the chat), so `hub-async.sh` used to be told to guess the id from
+    `basename $PWD`. Passing it explicitly retires that guess.
+
+    Set only when an id exists — never as an empty string. `hub-async.sh`
+    treats "unset" as "this session cannot receive an async result", which is
+    also how nested async jobs are blocked: `hub-async-worker.sh` strips
+    HUB_CHAT_ID from the environment it hands `claude -p` (`env -u`), so a
+    `submit` inside a running job dies for want of a chat. Note that stripping
+    is required, not incidental — the worker inherits this variable from the
+    submitting agent through `hub-async.sh`'s `os.execv`.
+    """
+    return {"HUB_CHAT_ID": chat_id} if chat_id else {}
+
+
 from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
@@ -1762,6 +1781,13 @@ class Pipe:
             )
         if kb_server is not None:
             options_kwargs["mcp_servers"] = {"helm-kb": kb_server}
+        # No bare chat_id local here (unlike the main loop) — this fast path
+        # only has `metadata`, which OWUI populates with the chat id under
+        # the "chat_id" key.
+        chat_id = (metadata or {}).get("chat_id") or None
+        agent_env = _agent_env(chat_id)
+        if agent_env:
+            options_kwargs["env"] = {**options_kwargs.get("env", {}), **agent_env}
         options = ClaudeAgentOptions(**options_kwargs)
 
         if event_emitter:
@@ -1971,6 +1997,14 @@ class Pipe:
         # claude CLI refuses --dangerously-skip-permissions under root unless
         # told it's inside a sandbox. OpenWebUI's backend runs as UID 0.
         os.environ.setdefault("IS_SANDBOX", "1")
+        # HUB_CHAT_ID reaches the agent exactly one way: `_agent_env` putting it
+        # in this client's `ClaudeAgentOptions.env`. `_agent_env` returning `{}`
+        # means "inherit", not "guaranteed unset" — so for a caller with no chat
+        # id, an ambient HUB_CHAT_ID in Open WebUI's own environment would flow
+        # straight through to the agent, and `hub-async.sh` would deliver that
+        # session's async result into someone else's conversation. Clearing it
+        # here makes the per-client value the only path there is.
+        os.environ.pop("HUB_CHAT_ID", None)
 
         prompt = _extract_latest_user_prompt(body)
         if not prompt:
@@ -2147,6 +2181,10 @@ class Pipe:
                 "preset": "claude_code",
                 "append": "\n\n".join(append_parts),
             }
+
+        agent_env = _agent_env(chat_id)
+        if agent_env:
+            options_kwargs["env"] = {**options_kwargs.get("env", {}), **agent_env}
 
         options = ClaudeAgentOptions(**options_kwargs)
 

@@ -127,6 +127,18 @@ check("base id falls through", resolve("claude_code.claude-code", "claude-opus-5
       "claude-opus-5")
 check("empty falls through", resolve("", "claude-opus-5"), "claude-opus-5")
 
+# ── agent env (chat id handed to the SDK subprocess) ───────────────────────
+_agent_env = mod._agent_env
+
+check("chat id becomes HUB_CHAT_ID",
+      _agent_env("be6f5945-867f-4be5-8055-0a4e5d65f136"),
+      {"HUB_CHAT_ID": "be6f5945-867f-4be5-8055-0a4e5d65f136"})
+
+# Absent, NOT empty: hub-async.sh treats an unset variable as "this session has
+# no chat", and the async worker relies on that to make nested jobs fail.
+check("no chat id yields no key at all", _agent_env(None), {})
+check("empty chat id yields no key at all", _agent_env(""), {})
+
 if fails:
     print(f"FAIL ({len(fails)})")
     for f in fails:
