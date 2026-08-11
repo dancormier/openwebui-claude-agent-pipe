@@ -21,11 +21,15 @@ Base: [tfriedel/openwebui-claude-code](https://github.com/tfriedel/openwebui-cla
 7. **Durable sessions** — chat_id → session_id persisted to
    `WORKDIR_ROOT/.sessions/<chat_id>.json`; survives OWUI restarts and
    redeploys. In-process map is now only a cache.
-8. **Keyless warm sessions** — callers without chat_id (Conduit) get session
+8. **Keyless warm sessions** — callers without chat_id get session
    identity via a conversation-prefix fingerprint stored in
    `WORKDIR_ROOT/_sessions.json`; each keyless chat gets its own
    `anon-<uuid>` workdir (shared `default` retired). Dead resume ids retry
    the turn cold once.
+   **Conduit is not always keyless** (verified 2026-08-11): it carries the
+   `chat_id` for a chat started elsewhere, so a desktop → iOS handoff mid-thread
+   arrives *keyed* and resumes via patch 7, workdir `~/hub/<chat_id>/`. Which
+   path a turn took is visible in the workdir name — `anon-*` means keyless.
 9. **Repo-aware workdir** — `#repo:<name>` on a chat's first message runs the
    chat in an allowlisted repo (`REPO_MAP` valve) instead of the scratch
    workdir, loading that repo's CLAUDE.md. Session metadata stays under
