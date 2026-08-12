@@ -1874,6 +1874,9 @@ class Pipe:
                 pass
 
         thinking_buffers: Dict[int, str] = {}
+        # Paragraph break between consecutive assistant text blocks — same
+        # rationale as the full agent path (see _pipe_stream's text_emitted).
+        text_emitted = False
         try:
             async with ClaudeSDKClient(options=options) as client:
                 await client.query(prompt)
@@ -1887,11 +1890,16 @@ class Pipe:
                             block = ev.get("content_block") or {}
                             if block.get("type") == "thinking":
                                 thinking_buffers[ev.get("index", 0)] = ""
+                            elif block.get("type") == "text" and text_emitted:
+                                yield "\n\n"
                         elif etype == "content_block_delta":
                             delta = ev.get("delta") or {}
                             dt = delta.get("type")
                             if dt == "text_delta":
-                                yield delta.get("text", "")
+                                text = delta.get("text", "")
+                                if text:
+                                    text_emitted = True
+                                    yield text
                             elif dt == "thinking_delta":
                                 idx = ev.get("index", 0)
                                 if idx in thinking_buffers:
@@ -2300,6 +2308,13 @@ class Pipe:
         # at each message_start (indices restart per assistant message).
         thinking_buffers: Dict[int, str] = {}
 
+        # Consecutive assistant text blocks (each narration beat between tool
+        # calls is its own block) would otherwise stream back-to-back with no
+        # separator — "…the vault note:Diff is exactly…". Emit a paragraph
+        # break at each new text block after the first; Markdown collapses
+        # blank lines, so an already-separated stream can't over-space.
+        text_emitted = False
+
         # Heartbeat: when a tool starts, emit a status update every 5s showing
         # elapsed time so the user sees that long-running commands (e.g. a 30s
         # Bash) aren't stuck. Keyed by tool_use_id; completed tools removed on
@@ -2377,11 +2392,16 @@ class Pipe:
                             if block.get("type") == "thinking":
                                 thinking_buffers[ev.get("index", 0)] = ""
                                 await emit_status("💭 Thinking…")
+                            elif block.get("type") == "text" and text_emitted:
+                                yield "\n\n"
                         elif etype == "content_block_delta":
                             delta = ev.get("delta") or {}
                             dt = delta.get("type")
                             if dt == "text_delta":
-                                yield delta.get("text", "")
+                                text = delta.get("text", "")
+                                if text:
+                                    text_emitted = True
+                                    yield text
                             elif dt == "thinking_delta":
                                 idx = ev.get("index", 0)
                                 if idx in thinking_buffers:
