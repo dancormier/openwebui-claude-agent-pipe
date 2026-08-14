@@ -78,8 +78,22 @@ for label, value in [
     contains_none_of(f"{label} scrubbed", clean, [value])
     check(f"{label} labelled", hits, [label])
 
-clean, _ = _redact_secrets("-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n")
-contains_none_of("private key header scrubbed", clean, ["BEGIN OPENSSH PRIVATE KEY"])
+# The BODY is the secret. Asserting only that the header vanished is what let
+# a header-only pattern ship: it emitted «redacted:private-key» and then the
+# entire key, which reads as "handled" in the logs and suppresses rotation.
+KEY_BODY = "b3BlbnNzaC1rZXktdjEAAAAA" * 4
+PRIVATE_KEY = (
+    "-----BEGIN OPENSSH PRIVATE KEY-----\n" + KEY_BODY + "\n"
+    "-----END OPENSSH PRIVATE KEY-----\n"
+)
+clean, hits = _redact_secrets(PRIVATE_KEY)
+contains_none_of("private key scrubbed", clean, ["BEGIN OPENSSH PRIVATE KEY", KEY_BODY])
+check("private key labelled", hits, ["private-key"])
+
+# A key whose END never arrives (truncated output, killed tool) must not
+# release its body either.
+clean, hits = _redact_secrets("-----BEGIN RSA PRIVATE KEY-----\n" + KEY_BODY)
+contains_none_of("open private key scrubbed", clean, [KEY_BODY])
 
 # Ordinary prose must survive untouched.
 prose = "The sk- prefix identifies these keys; see docs at https://example.com/x."
@@ -115,6 +129,32 @@ check("held tail flushed", out, "trailing sk-")
 r = _StreamRedactor()
 out = "".join(r.feed(w) for w in ["Kubernetes ", "clusters ", "scale"]) + r.flush()
 check("prose streams intact", out, "Kubernetes clusters scale")
+
+# A secret longer than the held-tail cap. A Google id_token runs 1-2KB; with the
+# cap at 512 its still-growing prefix blew the bound, took the release-raw
+# branch, and streamed out verbatim with NO hit recorded -- so even the warning
+# log was silent. Regression: the leak was invisible, not just unredacted.
+BIG_JWT_BODY = "eyJ" + "a" * 900
+BIG_JWT = f"eyJhbGciOiJSUzI1NiJ9.{BIG_JWT_BODY}.{'c' * 300}"
+r = _StreamRedactor()
+out = "".join(r.feed(BIG_JWT[i : i + 64]) for i in range(0, len(BIG_JWT), 64))
+out += r.flush()
+contains_none_of("oversized jwt scrubbed", out, [BIG_JWT_BODY, BIG_JWT])
+if not r.hits:
+    fails.append("oversized jwt: leaked with NO hit recorded — silent failure")
+
+# A private key streamed in small chunks: the body matches no prefix rule, so
+# without an explicit hold-until-END it escapes one chunk at a time.
+r = _StreamRedactor()
+out = "".join(PRIVATE_KEY[i : i + 40] and r.feed(PRIVATE_KEY[i : i + 40])
+              for i in range(0, len(PRIVATE_KEY), 40)) + r.flush()
+contains_none_of("streamed private key", out, [KEY_BODY])
+check("streamed private key labelled", r.hits, ["private-key"])
+
+# Stream that ends mid-key must not release the held body on flush.
+r = _StreamRedactor()
+out = r.feed("-----BEGIN RSA PRIVATE KEY-----\n" + KEY_BODY) + r.flush()
+contains_none_of("flush mid-key", out, [KEY_BODY])
 
 # ── event payloads ─────────────────────────────────────────────────────────
 hits = []

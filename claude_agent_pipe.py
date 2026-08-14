@@ -69,8 +69,36 @@ _SECRET_PATTERNS: List[tuple] = [
     ("aws-access-key", re.compile(r"AKIA[0-9A-Z]{16}")),
     ("google-api-key", re.compile(r"AIza[0-9A-Za-z_\-]{35}")),
     ("jwt", re.compile(r"eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}")),
-    ("private-key", re.compile(r"-----BEGIN[A-Z ]*PRIVATE KEY-----")),
+    # The BODY is the secret, not the header. Matching only the header emitted
+    # «redacted:private-key» followed by the entire key -- worse than a miss,
+    # because the logged hit reads as "handled" and suppresses rotation.
+    # Full block first so it consumes the body; the bare header stays as a
+    # backstop for a block whose END never arrives.
+    ("private-key", re.compile(
+        r"-----BEGIN[A-Z ]*PRIVATE KEY-----.*?-----END[A-Z ]*PRIVATE KEY-----",
+        re.S)),
+    # NOTE: no bare-header pattern. It would replace the header and strand the
+    # body, and would also hide the run from _scrub_open_private_key below,
+    # which is what actually handles a block whose END never arrives.
 ]
+
+# A private key spans many chunks, and its body matches no prefix rule in
+# _SECRET_TAIL_RX, so the stream redactor needs an explicit hold-until-END.
+_PK_BEGIN_RX = re.compile(r"-----BEGIN[A-Z ]*PRIVATE KEY-----")
+_PK_END_RX = re.compile(r"-----END[A-Z ]*PRIVATE KEY-----")
+# RSA-4096 armor runs ~3.2KB; past this we stop waiting for END and redact.
+_MAX_HELD_KEY = 16384
+
+
+def _scrub_open_private_key(text: str) -> tuple:
+    """Redact a BEGIN-with-no-END run through end of `text`.
+
+    Releasing such a run raw is what let key bodies escape one chunk at a time.
+    """
+    m = _PK_BEGIN_RX.search(text)
+    if not m or _PK_END_RX.search(text, m.end()):
+        return text, []
+    return text[: m.start()] + "«redacted:private-key»", ["private-key"]
 
 # A secret split across two stream chunks defeats a per-chunk regex, so the
 # redactor holds back any tail that could still grow into a match. These
@@ -87,10 +115,12 @@ _SECRET_TAIL_RX = re.compile(
     r")\Z"
 )
 
-# Upper bound on the held-back tail. Every pattern above tops out well under
-# this; past it the tail cannot be a prefix of any match we recognise, so
-# holding more would stall output for nothing.
-_MAX_HELD_TAIL = 512
+# Upper bound on the held-back tail. This was 512, which was wrong for JWTs:
+# a Google id_token runs ~1-2KB, so its still-growing prefix blew the cap, took
+# the release-raw branch below, and streamed out verbatim -- and because no
+# COMPLETE pattern ever matched, hits was empty and even the warning log stayed
+# silent. Sized for the longest secret we recognise, not the shortest.
+_MAX_HELD_TAIL = 4096
 
 
 def _redact_secrets(text: str) -> tuple:
@@ -102,6 +132,11 @@ def _redact_secrets(text: str) -> tuple:
         text, n = rx.subn(f"«redacted:{label}»", text)
         if n:
             hits.extend([label] * n)
+    # Complete blocks are gone by now, so any surviving BEGIN is unterminated:
+    # a key still streaming, or output cut off mid-armor. Either way the body
+    # after it must not be released. Runs last so it cannot mask a full block.
+    text, pk_hits = _scrub_open_private_key(text)
+    hits.extend(pk_hits)
     return text, hits
 
 
@@ -121,6 +156,20 @@ class _StreamRedactor:
         if not chunk:
             return ""
         buf = self._held + chunk
+        # An unterminated private key holds from BEGIN: its base64 body matches
+        # no prefix rule below, so without this the body streams out in pieces.
+        pk = _PK_BEGIN_RX.search(buf)
+        if pk and not _PK_END_RX.search(buf, pk.end()):
+            if len(buf) - pk.start() <= _MAX_HELD_KEY:
+                self._held = buf[pk.start() :]
+                buf = buf[: pk.start()]
+            else:
+                buf, pk_hits = _scrub_open_private_key(buf)
+                self.hits.extend(pk_hits)
+                self._held = ""
+            safe, hits = _redact_secrets(buf)
+            self.hits.extend(hits)
+            return safe
         # Split off the still-growing tail BEFORE redacting. Redacting first
         # would fire on a partially-arrived secret the moment it cleared the
         # pattern's length floor, releasing the rest of it verbatim as the
@@ -129,6 +178,15 @@ class _StreamRedactor:
         if tail and len(buf) - tail.start() <= _MAX_HELD_TAIL:
             self._held = buf[tail.start() :]
             buf = buf[: tail.start()]
+        elif tail:
+            # Over cap. Releasing raw is exactly how an oversized JWT escaped:
+            # no complete pattern matches a still-arriving secret, so nothing
+            # redacts it and nothing logs it. A run this long that still looks
+            # like a secret prefix gets redacted instead -- consistent with the
+            # module's rule that over-matching is far cheaper than a rotation.
+            buf = buf[: tail.start()] + "«redacted:truncated»"
+            self.hits.append("truncated")
+            self._held = ""
         else:
             self._held = ""
         safe, hits = _redact_secrets(buf)
@@ -136,7 +194,11 @@ class _StreamRedactor:
         return safe
 
     def flush(self) -> str:
-        out, hits = _redact_secrets(self._held)
+        # A stream can end mid-key (truncated output, killed tool). Scrub the
+        # open BEGIN run first, or flush would release the held body verbatim.
+        pending, pk_hits = _scrub_open_private_key(self._held)
+        self.hits.extend(pk_hits)
+        out, hits = _redact_secrets(pending)
         self.hits.extend(hits)
         self._held = ""
         return out
