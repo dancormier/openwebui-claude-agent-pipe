@@ -48,6 +48,10 @@ GITHUB = "ghp_" + "z9y8x7w6v5" * 3
 SLACK = "xoxb-1234567890-1234567890-" + "abcdefghij" * 2
 AWS = "AKIA" + "ABCDEFGH12345678"
 JWT = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVPmB92K27uhbUJU1p1r"
+SLACK_APP = "xapp-1-A0FAKE12345-1234567890123-" + "deadbeef01" * 4
+GOCSPX = "GOCSPX-" + "Ab1Cd2Ef3G" * 3
+GREFRESH = "1//0g" + "FakeRefr01" * 5
+SK_PROJ = "sk-proj-" + "Ab1_Cd2-Ef" * 5
 
 fails = []
 
@@ -73,6 +77,10 @@ for label, value in [
     ("slack-token", SLACK),
     ("aws-access-key", AWS),
     ("jwt", JWT),
+    ("slack-app-token", SLACK_APP),
+    ("google-client-secret", GOCSPX),
+    ("google-refresh-token", GREFRESH),
+    ("openai-key", SK_PROJ),
 ]:
     clean, hits = _redact_secrets(f"x {value} y")
     contains_none_of(f"{label} scrubbed", clean, [value])
@@ -129,6 +137,19 @@ check("held tail flushed", out, "trailing sk-")
 r = _StreamRedactor()
 out = "".join(r.feed(w) for w in ["Kubernetes ", "clusters ", "scale"]) + r.flush()
 check("prose streams intact", out, "Kubernetes clusters scale")
+
+# New tail shapes must survive chunk splits: feed an xapp token and a Google
+# refresh token 7 chars at a time — the growing prefix must be HELD, never
+# released raw (the 2026-08-14 audit's missing-tail-pattern gap).
+for lbl, val in [("slack-app-token", SLACK_APP), ("google-refresh-token", GREFRESH)]:
+    r = _StreamRedactor()
+    out = ""
+    text = f"pre {val} post"
+    for i in range(0, len(text), 7):
+        out += r.feed(text[i:i + 7])
+    out += r.flush()
+    contains_none_of(f"streamed {lbl} scrubbed", out, [val])
+    check(f"streamed {lbl} labelled", r.hits, [lbl])
 
 # A secret longer than the held-tail cap. A Google id_token runs 1-2KB; with the
 # cap at 512 its still-growing prefix blew the bound, took the release-raw

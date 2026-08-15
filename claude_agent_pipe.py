@@ -62,8 +62,14 @@ _MAX_ARTIFACT_BYTES = 50 * 1024 * 1024  # 50 MiB
 # under-matching (a rotation).
 _SECRET_PATTERNS: List[tuple] = [
     ("anthropic-token", re.compile(r"sk-ant-[A-Za-z0-9_\-]{16,}")),
-    ("openai-key", re.compile(r"sk-(?:proj-)?[A-Za-z0-9]{32,}")),
+    # [_\-] included: modern sk-proj- keys contain separators, so a pure
+    # alnum floor of 32 never matched them (audit 2026-08-14).
+    ("openai-key", re.compile(r"sk-(?:proj-)?[A-Za-z0-9_\-]{32,}")),
     ("slack-token", re.compile(r"xox[baprse]-[A-Za-z0-9\-]{10,}")),
+    # xapp- (Slack app-level token) is NOT covered by xox[baprse].
+    ("slack-app-token", re.compile(r"xapp-[0-9]-[A-Za-z0-9\-]{10,}")),
+    ("google-client-secret", re.compile(r"GOCSPX-[A-Za-z0-9_\-]{20,}")),
+    ("google-refresh-token", re.compile(r"1//0[A-Za-z0-9_\-]{20,}")),
     ("github-token", re.compile(r"gh[pousr]_[A-Za-z0-9]{20,}")),
     ("github-pat", re.compile(r"github_pat_[A-Za-z0-9_]{20,}")),
     ("aws-access-key", re.compile(r"AKIA[0-9A-Z]{16}")),
@@ -107,7 +113,9 @@ def _scrub_open_private_key(text: str) -> tuple:
 _SECRET_TAIL_RX = re.compile(
     r"(?:"
     r"s|sk|sk-|sk-a(?:n(?:t(?:-[A-Za-z0-9_\-]*)?)?)?|sk-(?:proj-?)?[A-Za-z0-9]*"
-    r"|x|xo|xox|xox[baprse](?:-[A-Za-z0-9\-]*)?"
+    r"|x|xo|xox|xox[baprse](?:-[A-Za-z0-9\-]*)?|xa|xap|xapp(?:-[A-Za-z0-9\-]*)?"
+    r"|G|GO|GOC|GOCS|GOCSP|GOCSPX(?:-[A-Za-z0-9_\-]*)?"
+    r"|1|1/|1//|1//0[A-Za-z0-9_\-]*"
     r"|g|gh|gh[pousr](?:_[A-Za-z0-9]*)?|github(?:_(?:p(?:a(?:t(?:_[A-Za-z0-9_]*)?)?)?)?)?"
     r"|A|AK|AKI|AKIA[0-9A-Z]*|AI|AIz|AIza[0-9A-Za-z_\-]*"
     r"|e|ey|eyJ[A-Za-z0-9_\-]*(?:\.[A-Za-z0-9_\-]*){0,2}"
