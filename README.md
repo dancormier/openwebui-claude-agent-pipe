@@ -43,8 +43,9 @@ Note: repo-rooted chats (#repo:) don't surface files created in the repo cwd as 
 
 Note: Hook verification: `scripts/verify-pipe-hooks.sh` (run on the Mini) proves the deny-secret-exfil PreToolUse hook fires for pipe-like headless runs.
 
-To redeploy after editing: `scripts/deploy-pipe.sh` (run on the Mini with the
-admin key in `$KEY` — usage in its header; backs up the deployed copy, posts
-the repo copy, verifies parity, and runs the suites against the deployed
-copy), or paste into Admin → Functions. Valve state lives in webui.db, not
+To redeploy after editing: `source ~/.secrets && scripts/deploy-pipe.sh` on the
+Mini — it takes the admin key from `OPENWEBUI_ADMIN_API_KEY`, or from an
+explicit `$KEY` piped in from the laptop (usage in its header). It backs up the
+deployed copy, posts the repo copy, verifies parity, and runs the suites
+against the deployed copy. Or paste into Admin → Functions. Valve state lives in webui.db, not
 here — `scripts/set-repo-map.sh` updates the REPO_MAP valve.
