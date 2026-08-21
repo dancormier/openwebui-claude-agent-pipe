@@ -41,7 +41,7 @@ Base: [tfriedel/openwebui-claude-code](https://github.com/tfriedel/openwebui-cla
 
 Note: repo-rooted chats (#repo:) don't surface files created in the repo cwd as chat attachments — the artifact scanner deliberately walks only the scratch workdir and /tmp.
 
-Note: Hook verification: `scripts/verify-pipe-hooks.sh` (run on the Mini) proves the deny-secret-exfil PreToolUse hook fires for pipe-like headless runs.
+Note: Hook verification: `scripts/verify-pipe-hooks.sh` (run on the Mini) proves the deny-secret-exfil PreToolUse hook fires for pipe-like headless runs and that no Home Assistant actuation connector tool is callable in them (the `permissions.deny` list in `claude/settings.json` matches exact tool names, so a renamed connector would otherwise un-deny them silently).
 
 To redeploy after editing: `source ~/.secrets && scripts/deploy-pipe.sh` on the
 Mini — it takes the admin key from `OPENWEBUI_ADMIN_API_KEY`, or from an
