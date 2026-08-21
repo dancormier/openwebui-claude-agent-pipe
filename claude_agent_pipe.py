@@ -73,6 +73,8 @@ _SECRET_PATTERNS: List[tuple] = [
     ("github-token", re.compile(r"gh[pousr]_[A-Za-z0-9]{20,}")),
     ("github-pat", re.compile(r"github_pat_[A-Za-z0-9_]{20,}")),
     ("aws-access-key", re.compile(r"AKIA[0-9A-Z]{16}")),
+    # 1Password service-account token (the op-secrets loader's own credential).
+    ("onepassword-service-token", re.compile(r"ops_[A-Za-z0-9_\-]{20,}")),
     ("google-api-key", re.compile(r"AIza[0-9A-Za-z_\-]{35}")),
     ("jwt", re.compile(r"eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}")),
     # The BODY is the secret, not the header. Matching only the header emitted
@@ -119,6 +121,7 @@ _SECRET_TAIL_RX = re.compile(
     r"|g|gh|gh[pousr](?:_[A-Za-z0-9]*)?|github(?:_(?:p(?:a(?:t(?:_[A-Za-z0-9_]*)?)?)?)?)?"
     r"|A|AK|AKI|AKIA[0-9A-Z]*|AI|AIz|AIza[0-9A-Za-z_\-]*"
     r"|e|ey|eyJ[A-Za-z0-9_\-]*(?:\.[A-Za-z0-9_\-]*){0,2}"
+    r"|o|op|ops(?:_[A-Za-z0-9_\-]*)?"
     r"|-{1,5}(?:BEGIN[A-Z ]*)?"
     r")\Z"
 )

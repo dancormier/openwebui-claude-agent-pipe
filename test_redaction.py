@@ -52,6 +52,7 @@ SLACK_APP = "xapp-1-A0FAKE12345-1234567890123-" + "deadbeef01" * 4
 GOCSPX = "GOCSPX-" + "Ab1Cd2Ef3G" * 3
 GREFRESH = "1//0g" + "FakeRefr01" * 5
 SK_PROJ = "sk-proj-" + "Ab1_Cd2-Ef" * 5
+OPS = "ops_eyJ" + "FakeSvcTok" * 6
 
 fails = []
 
@@ -81,6 +82,7 @@ for label, value in [
     ("google-client-secret", GOCSPX),
     ("google-refresh-token", GREFRESH),
     ("openai-key", SK_PROJ),
+    ("onepassword-service-token", OPS),
 ]:
     clean, hits = _redact_secrets(f"x {value} y")
     contains_none_of(f"{label} scrubbed", clean, [value])
@@ -141,7 +143,8 @@ check("prose streams intact", out, "Kubernetes clusters scale")
 # New tail shapes must survive chunk splits: feed an xapp token and a Google
 # refresh token 7 chars at a time — the growing prefix must be HELD, never
 # released raw (the 2026-08-14 audit's missing-tail-pattern gap).
-for lbl, val in [("slack-app-token", SLACK_APP), ("google-refresh-token", GREFRESH)]:
+for lbl, val in [("slack-app-token", SLACK_APP), ("google-refresh-token", GREFRESH),
+                 ("onepassword-service-token", OPS)]:
     r = _StreamRedactor()
     out = ""
     text = f"pre {val} post"

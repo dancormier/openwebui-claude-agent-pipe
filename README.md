@@ -49,3 +49,11 @@ explicit `$KEY` piped in from the laptop (usage in its header). It backs up the
 deployed copy, posts the repo copy, verifies parity, and runs the suites
 against the deployed copy. Or paste into Admin → Functions. Valve state lives in webui.db, not
 here — `scripts/set-repo-map.sh` updates the REPO_MAP valve.
+
+Known-value redaction (2026-08-21): the patterns are prefix-anchored and cannot
+recognise a uuid token, an ntfy topic or a password, so the two job workers and
+`slack-reply.sh` call `redact_stdin.py --known-from-tpl shell/secrets.tpl`
+inside a subshell that sourced `~/.secrets`, and every live value (plus its
+base64/hex/URL-encoded forms) is scrubbed by value. That path slices the *repo*
+copy of the pipe, so a pattern added here protects the workers on merge but the
+gateway stream only after a redeploy.
