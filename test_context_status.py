@@ -33,6 +33,8 @@ exec(compile(head, str(PIPE), "exec"), mod.__dict__)
 fmt = mod._fmt_tokens
 ctx_tokens = mod._context_tokens
 ctx_status = mod._context_status
+fmt_dur = mod._fmt_duration
+effort_prefix = mod._extract_effort_prefix
 
 fails = []
 
@@ -72,6 +74,18 @@ check(
     ctx_status({"input_tokens": 300_000}, 200_000),
     "context 300k/200k (150%)",
 )
+
+check("dur seconds", fmt_dur(4_200), "4s")
+check("dur minutes", fmt_dur(102_000), "1m42s")
+check("dur hours", fmt_dur(3_725_000), "1h02m")
+check("dur zero", fmt_dur(0), "0s")
+
+check("effort none", effort_prefix("hello there"), (None, "hello there"))
+check("effort space", effort_prefix("/effort low do the thing"), ("low", "do the thing"))
+check("effort colon", effort_prefix("/effort: xhigh go"), ("xhigh", "go"))
+check("effort case", effort_prefix("/EFFORT MAX go"), ("max", "go"))
+check("effort bogus level", effort_prefix("/effort turbo go"), (None, "/effort turbo go"))
+check("effort mid-message ignored", effort_prefix("try /effort low"), (None, "try /effort low"))
 
 if fails:
     print("FAIL")

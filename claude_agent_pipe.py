@@ -524,6 +524,31 @@ def _context_status(usage: Optional[Dict[str, Any]], window: int) -> str:
     return f"context {_fmt_tokens(used)}/{_fmt_tokens(window)} ({pct}%)"
 
 
+def _fmt_duration(ms: int) -> str:
+    s = max(0, round(ms / 1000))
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m{s % 60:02d}s"
+    return f"{s // 3600}h{(s % 3600) // 60:02d}m"
+
+
+_EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
+_EFFORT_PREFIX_RX = re.compile(
+    r"/effort[:= ]\s*(low|medium|high|xhigh|max)\b", re.IGNORECASE
+)
+
+
+def _extract_effort_prefix(prompt: str) -> Tuple[Optional[str], str]:
+    """`/effort <level>` at the very start of a message overrides the EFFORT
+    valve for that turn. Returns (level or None, prompt without the prefix)."""
+    stripped = prompt.lstrip()
+    m = _EFFORT_PREFIX_RX.match(stripped)
+    if not m:
+        return None, prompt
+    return m.group(1).lower(), stripped[m.end():].lstrip()
+
+
 from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
@@ -1615,10 +1640,33 @@ class Pipe:
         CONTEXT_WINDOW_TOKENS: int = Field(
             default=200_000,
             description=(
-                "Model context window (tokens) for the post-turn "
-                "'Done · context X/Y (N%)' status line. Set to 1000000 if the "
-                "gateway's sessions run with the 1M context window. 0 disables "
-                "the context suffix (the usage stats event is still emitted)."
+                "FALLBACK context window (tokens) for the post-turn "
+                "'Done · context X/Y (N%)' status line, used only when the "
+                "SDK's live context query fails (which otherwise supplies the "
+                "real per-model window). 0 disables the fallback suffix."
+            ),
+        )
+        EFFORT: str = Field(
+            default="",
+            description=(
+                "Default effort level for agent turns: low|medium|high|xhigh|"
+                "max. Empty = SDK default (high). A message starting with "
+                "'/effort <level>' overrides it for that turn."
+            ),
+        )
+        TASK_BUDGET_TOKENS: int = Field(
+            default=0,
+            description=(
+                "Per-turn token budget the model is made aware of and paces "
+                "itself against (output_config.task_budget). API minimum is "
+                "20000 — smaller nonzero values are ignored. 0 disables."
+            ),
+        )
+        FALLBACK_MODEL: str = Field(
+            default="",
+            description=(
+                "Model to retry with if the primary model fails or is "
+                "unavailable (SDK fallback_model). Empty disables."
             ),
         )
         MAX_BUFFER_MB: int = Field(
@@ -2208,6 +2256,7 @@ class Pipe:
         # Fast path disabled — always run the full agent loop.
         prompt = _strip_mode_prefix(prompt)
         repo_name, prompt = _extract_repo_prefix(prompt)
+        effort_override, prompt = _extract_effort_prefix(prompt)
 
         # Keyless callers (no __chat_id__ — generic OpenAI-API clients such
         # as Conduit or voice integrations don't send OWUI's proprietary
@@ -2352,6 +2401,15 @@ class Pipe:
             )
         if kb_server is not None:
             options_kwargs["mcp_servers"] = {"helm-kb": kb_server}
+        effort = effort_override or self.valves.EFFORT.strip().lower() or None
+        if effort in _EFFORT_LEVELS:
+            options_kwargs["effort"] = effort
+        if self.valves.TASK_BUDGET_TOKENS >= 20_000:
+            options_kwargs["task_budget"] = {
+                "total": self.valves.TASK_BUDGET_TOKENS
+            }
+        if self.valves.FALLBACK_MODEL.strip():
+            options_kwargs["fallback_model"] = self.valves.FALLBACK_MODEL.strip()
 
         # Extend Claude Code's default agent-loop system prompt with whatever
         # the Workspace Model configured. `append` keeps the agentic prompt
@@ -2470,8 +2528,12 @@ class Pipe:
         # Usage of the most recent main-thread API call. Its field sum IS the
         # session's current context size; ResultMessage.usage cannot be used
         # for this — it accumulates across every call in the turn, re-counting
-        # the cached prefix once per tool round.
+        # the cached prefix once per tool round. Fallback only: the primary
+        # context source is client.get_context_usage() at turn end.
         last_usage: Optional[Dict[str, Any]] = None
+
+        # Main-thread tool calls this turn, for the Done line.
+        tool_count = 0
 
         try:
             async with ClaudeSDKClient(options=options) as client:
@@ -2503,6 +2565,10 @@ class Pipe:
                                 )
                             else:
                                 await emit_status("Session: new chat")
+                        elif message.subtype == "compact_boundary":
+                            # Auto-compaction summarized earlier history — the
+                            # context number will drop; say why.
+                            await emit_status("Session: context compacted")
                         continue
 
                     if isinstance(message, StreamEvent):
@@ -2549,8 +2615,13 @@ class Pipe:
                         # Subagent (parent_tool_use_id set) calls run in their
                         # own context windows — only main-thread usage reflects
                         # this session.
-                        if message.usage and message.parent_tool_use_id is None:
-                            last_usage = message.usage
+                        if message.parent_tool_use_id is None:
+                            if message.usage:
+                                last_usage = message.usage
+                            tool_count += sum(
+                                isinstance(b, ToolUseBlock)
+                                for b in message.content
+                            )
                         # Text + thinking already streamed via StreamEvent. Only
                         # emit tool-use previews here (we need the completed
                         # input dict, which StreamEvent only has as partial JSON).
@@ -2616,11 +2687,40 @@ class Pipe:
                         continue
 
                     if isinstance(message, ResultMessage):
-                        ctx = _context_status(
-                            last_usage, self.valves.CONTEXT_WINDOW_TOKENS
-                        )
+                        parts: List[str] = []
+                        if message.duration_ms:
+                            parts.append(_fmt_duration(message.duration_ms))
+                        if tool_count:
+                            plural = "s" if tool_count != 1 else ""
+                            parts.append(f"{tool_count} tool{plural}")
+                        # Live per-model context: totalTokens against the raw
+                        # model window, same data as the CLI's /context.
+                        ctx = ""
+                        try:
+                            cu = await asyncio.wait_for(
+                                client.get_context_usage(), timeout=5
+                            )
+                            used = int(cu.get("totalTokens") or 0)
+                            window = int(cu.get("rawMaxTokens") or 0)
+                            if used and window:
+                                pct = round(100 * used / window)
+                                ctx = (
+                                    f"context {_fmt_tokens(used)}/"
+                                    f"{_fmt_tokens(window)} ({pct}%)"
+                                )
+                        except Exception:
+                            log.debug(
+                                "get_context_usage failed", exc_info=True
+                            )
+                        if not ctx:
+                            ctx = _context_status(
+                                last_usage, self.valves.CONTEXT_WINDOW_TOKENS
+                            )
+                        if ctx:
+                            parts.append(ctx)
                         await emit_status(
-                            f"Done · {ctx}" if ctx else "Done.", done=True
+                            "Done · " + " · ".join(parts) if parts else "Done.",
+                            done=True,
                         )
                         if __event_emitter__ is not None and last_usage:
                             # OWUI-normalized usage → shows in the message's

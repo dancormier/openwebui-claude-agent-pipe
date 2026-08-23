@@ -39,13 +39,26 @@ Base: [tfriedel/openwebui-claude-code](https://github.com/tfriedel/openwebui-cla
 11. **Mobile concision hint** — keyless callers get a system-prompt append
     steering toward short answers.
 12. **Context-usage status** — the end-of-turn status reads
-    `Done · context 74k/200k (37%)`, computed from the last main-thread API
-    call's usage (input + cache_read + cache_creation + output ≈ current
-    session context; the ResultMessage's own `usage` sums across tool rounds
-    and overstates it). Window size is the `CONTEXT_WINDOW_TOKENS` valve
-    (default 200k; 0 hides the suffix). The same numbers are emitted as an
-    OWUI-normalized `chat:completion` usage event, so the message's info
-    popover and any community usage-display filter show real token counts.
+    `Done · 1m42s · 12 tools · context 396k/1M (40%)`. Context comes from
+    `client.get_context_usage()` (the CLI's `/context` data — real
+    totalTokens against the real per-model window, so Haiku's 200k and the
+    1M models are both right automatically). Fallback when that call fails:
+    the last main-thread API call's usage summed
+    (input + cache_read + cache_creation + output) against the
+    `CONTEXT_WINDOW_TOKENS` valve (the ResultMessage's own `usage` is never
+    used — it re-counts the cached prefix per tool round). Duration and
+    main-thread tool count ride along; `Session: context compacted` is
+    surfaced when auto-compaction fires. The last-call numbers are also
+    emitted as an OWUI-normalized `chat:completion` usage event, so the
+    message's info popover and any community usage-display filter show real
+    token counts.
+13. **Effort / task-budget / fallback valves** — `EFFORT` sets the default
+    effort level (empty = SDK default `high`); a message starting with
+    `/effort <low|medium|high|xhigh|max>` overrides it for that turn.
+    `TASK_BUDGET_TOKENS` (≥20000; 0 off) gives the model a per-turn token
+    budget it sees and paces itself against — the graceful alternative to a
+    turn cap while `MAX_TURNS` is 0. `FALLBACK_MODEL` retries the turn on
+    another model if the primary fails or is unavailable.
 
 Note: repo-rooted chats (#repo:) don't surface files created in the repo cwd as chat attachments — the artifact scanner deliberately walks only the scratch workdir and /tmp.
 
