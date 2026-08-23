@@ -38,6 +38,14 @@ Base: [tfriedel/openwebui-claude-code](https://github.com/tfriedel/openwebui-cla
     `cold start — history replayed` / `new chat`, so degradation is visible.
 11. **Mobile concision hint** — keyless callers get a system-prompt append
     steering toward short answers.
+12. **Context-usage status** — the end-of-turn status reads
+    `Done · context 74k/200k (37%)`, computed from the last main-thread API
+    call's usage (input + cache_read + cache_creation + output ≈ current
+    session context; the ResultMessage's own `usage` sums across tool rounds
+    and overstates it). Window size is the `CONTEXT_WINDOW_TOKENS` valve
+    (default 200k; 0 hides the suffix). The same numbers are emitted as an
+    OWUI-normalized `chat:completion` usage event, so the message's info
+    popover and any community usage-display filter show real token counts.
 
 Note: repo-rooted chats (#repo:) don't surface files created in the repo cwd as chat attachments — the artifact scanner deliberately walks only the scratch workdir and /tmp.
 

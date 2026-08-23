@@ -489,6 +489,41 @@ def _agent_env(chat_id: Optional[str]) -> Dict[str, str]:
     return {"HUB_CHAT_ID": chat_id} if chat_id else {}
 
 
+def _fmt_tokens(n: int) -> str:
+    if n < 1_000:
+        return str(n)
+    if n < 1_000_000:
+        return f"{round(n / 1_000)}k"
+    s = f"{n / 1_000_000:.2f}".rstrip("0").rstrip(".")
+    return f"{s}M"
+
+
+def _context_tokens(usage: Optional[Dict[str, Any]]) -> int:
+    """Context size implied by one API call's usage: the input-side fields
+    are the entire prompt (system + history + tool results), and adding
+    output_tokens gives the session context after the reply."""
+    if not usage:
+        return 0
+    return sum(
+        int(usage.get(k) or 0)
+        for k in (
+            "input_tokens",
+            "cache_read_input_tokens",
+            "cache_creation_input_tokens",
+            "output_tokens",
+        )
+    )
+
+
+def _context_status(usage: Optional[Dict[str, Any]], window: int) -> str:
+    """Render 'context 74k/200k (37%)', or '' when unknown/disabled."""
+    used = _context_tokens(usage)
+    if not used or window <= 0:
+        return ""
+    pct = round(100 * used / window)
+    return f"context {_fmt_tokens(used)}/{_fmt_tokens(window)} ({pct}%)"
+
+
 from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
@@ -1577,6 +1612,15 @@ class Pipe:
             default=30,
             description="Maximum agent turns per user message. 0 disables the cap.",
         )
+        CONTEXT_WINDOW_TOKENS: int = Field(
+            default=200_000,
+            description=(
+                "Model context window (tokens) for the post-turn "
+                "'Done · context X/Y (N%)' status line. Set to 1000000 if the "
+                "gateway's sessions run with the 1M context window. 0 disables "
+                "the context suffix (the usage stats event is still emitted)."
+            ),
+        )
         MAX_BUFFER_MB: int = Field(
             default=32,
             description=(
@@ -2423,6 +2467,12 @@ class Pipe:
         # callers) — consumed by keyless registration and resume-retry.
         turn_session_id: Optional[str] = None
 
+        # Usage of the most recent main-thread API call. Its field sum IS the
+        # session's current context size; ResultMessage.usage cannot be used
+        # for this — it accumulates across every call in the turn, re-counting
+        # the cached prefix once per tool round.
+        last_usage: Optional[Dict[str, Any]] = None
+
         try:
             async with ClaudeSDKClient(options=options) as client:
                 await client.query(prompt)
@@ -2496,6 +2546,11 @@ class Pipe:
                         continue
 
                     if isinstance(message, AssistantMessage):
+                        # Subagent (parent_tool_use_id set) calls run in their
+                        # own context windows — only main-thread usage reflects
+                        # this session.
+                        if message.usage and message.parent_tool_use_id is None:
+                            last_usage = message.usage
                         # Text + thinking already streamed via StreamEvent. Only
                         # emit tool-use previews here (we need the completed
                         # input dict, which StreamEvent only has as partial JSON).
@@ -2561,7 +2616,44 @@ class Pipe:
                         continue
 
                     if isinstance(message, ResultMessage):
-                        await emit_status("Done.", done=True)
+                        ctx = _context_status(
+                            last_usage, self.valves.CONTEXT_WINDOW_TOKENS
+                        )
+                        await emit_status(
+                            f"Done · {ctx}" if ctx else "Done.", done=True
+                        )
+                        if __event_emitter__ is not None and last_usage:
+                            # OWUI-normalized usage → shows in the message's
+                            # info popover and feeds any usage-display filter.
+                            out_tok = int(last_usage.get("output_tokens") or 0)
+                            total = _context_tokens(last_usage)
+                            try:
+                                await __event_emitter__(
+                                    {
+                                        "type": "chat:completion",
+                                        "data": {
+                                            "usage": {
+                                                "prompt_tokens": total - out_tok,
+                                                "completion_tokens": out_tok,
+                                                "total_tokens": total,
+                                                "cache_read_input_tokens": int(
+                                                    last_usage.get(
+                                                        "cache_read_input_tokens"
+                                                    )
+                                                    or 0
+                                                ),
+                                                "cache_creation_input_tokens": int(
+                                                    last_usage.get(
+                                                        "cache_creation_input_tokens"
+                                                    )
+                                                    or 0
+                                                ),
+                                            }
+                                        },
+                                    }
+                                )
+                            except Exception:
+                                log.debug("usage emit failed", exc_info=True)
                         for chunk in _inline_new_artifacts(
                             scan_dirs,
                             artifact_snapshot,
