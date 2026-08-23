@@ -10,6 +10,7 @@ requirements: claude-agent-sdk>=0.1.60, anthropic>=0.40.0
 import asyncio
 import base64
 import hashlib
+import inspect
 import json
 import logging
 import mimetypes
@@ -522,6 +523,23 @@ def _context_status(usage: Optional[Dict[str, Any]], window: int) -> str:
         return ""
     pct = round(100 * used / window)
     return f"context {_fmt_tokens(used)}/{_fmt_tokens(window)} ({pct}%)"
+
+
+def _owui_usage(usage: Dict[str, Any]) -> Dict[str, int]:
+    """OWUI-normalized usage dict from one API call's usage block."""
+    out_tok = int(usage.get("output_tokens") or 0)
+    total = _context_tokens(usage)
+    return {
+        "prompt_tokens": total - out_tok,
+        "completion_tokens": out_tok,
+        "total_tokens": total,
+        "cache_read_input_tokens": int(
+            usage.get("cache_read_input_tokens") or 0
+        ),
+        "cache_creation_input_tokens": int(
+            usage.get("cache_creation_input_tokens") or 0
+        ),
+    }
 
 
 def _fmt_duration(ms: int) -> str:
@@ -2722,38 +2740,52 @@ class Pipe:
                             "Done · " + " · ".join(parts) if parts else "Done.",
                             done=True,
                         )
-                        if __event_emitter__ is not None and last_usage:
-                            # OWUI-normalized usage → shows in the message's
-                            # info popover and feeds any usage-display filter.
-                            out_tok = int(last_usage.get("output_tokens") or 0)
-                            total = _context_tokens(last_usage)
+                        usage_payload = (
+                            _owui_usage(last_usage) if last_usage else None
+                        )
+                        if __event_emitter__ is not None and usage_payload:
+                            # Live listeners (usage-display filters on the
+                            # socket) — this event is never persisted.
                             try:
                                 await __event_emitter__(
                                     {
                                         "type": "chat:completion",
-                                        "data": {
-                                            "usage": {
-                                                "prompt_tokens": total - out_tok,
-                                                "completion_tokens": out_tok,
-                                                "total_tokens": total,
-                                                "cache_read_input_tokens": int(
-                                                    last_usage.get(
-                                                        "cache_read_input_tokens"
-                                                    )
-                                                    or 0
-                                                ),
-                                                "cache_creation_input_tokens": int(
-                                                    last_usage.get(
-                                                        "cache_creation_input_tokens"
-                                                    )
-                                                    or 0
-                                                ),
-                                            }
-                                        },
+                                        "data": {"usage": usage_payload},
                                     }
                                 )
                             except Exception:
                                 log.debug("usage emit failed", exc_info=True)
+                        if usage_payload:
+                            # The socket emitter's save_to_chat branch drops
+                            # chat:completion, and the message's ⓘ popover
+                            # renders from the *saved* message's `usage` — so
+                            # write it to the chat DB directly (in-process,
+                            # like the KB lookups). The upsert merges keys, so
+                            # the middleware's later {'done', 'output'} upsert
+                            # keeps it; isawaitable covers OWUI versions where
+                            # the upsert is sync.
+                            try:
+                                chat_id_meta = (__metadata__ or {}).get(
+                                    "chat_id"
+                                )
+                                msg_id_meta = (__metadata__ or {}).get(
+                                    "message_id"
+                                )
+                                if chat_id_meta and msg_id_meta:
+                                    from open_webui.models.chats import Chats
+
+                                    res = Chats.upsert_message_to_chat_by_id_and_message_id(
+                                        chat_id_meta,
+                                        msg_id_meta,
+                                        {"usage": usage_payload},
+                                        touch=False,
+                                    )
+                                    if inspect.isawaitable(res):
+                                        await res
+                            except Exception:
+                                log.debug(
+                                    "usage DB write failed", exc_info=True
+                                )
                         for chunk in _inline_new_artifacts(
                             scan_dirs,
                             artifact_snapshot,

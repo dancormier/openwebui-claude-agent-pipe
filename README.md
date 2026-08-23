@@ -49,9 +49,14 @@ Base: [tfriedel/openwebui-claude-code](https://github.com/tfriedel/openwebui-cla
     used — it re-counts the cached prefix per tool round). Duration and
     main-thread tool count ride along; `Session: context compacted` is
     surfaced when auto-compaction fires. The last-call numbers are also
-    emitted as an OWUI-normalized `chat:completion` usage event, so the
-    message's info popover and any community usage-display filter show real
-    token counts.
+    emitted as an OWUI-normalized `chat:completion` usage event for live
+    listeners (community usage-display filters), **and** written directly to
+    the saved message's `usage` field via
+    `Chats.upsert_message_to_chat_by_id_and_message_id` (`touch=False`) —
+    OWUI's socket emitter never persists `chat:completion` events, and the
+    message's ⓘ info popover renders only from the saved `usage`, so without
+    the DB write the popover never appears. Both paths are guarded so a
+    failure can't break the turn.
 13. **Effort / task-budget / fallback valves** — `EFFORT` sets the default
     effort level (empty = SDK default `high`); a message starting with
     `/effort <low|medium|high|xhigh|max>` overrides it for that turn.

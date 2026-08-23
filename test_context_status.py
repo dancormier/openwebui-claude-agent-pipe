@@ -33,6 +33,7 @@ exec(compile(head, str(PIPE), "exec"), mod.__dict__)
 fmt = mod._fmt_tokens
 ctx_tokens = mod._context_tokens
 ctx_status = mod._context_status
+owui_usage = mod._owui_usage
 fmt_dur = mod._fmt_duration
 effort_prefix = mod._extract_effort_prefix
 
@@ -73,6 +74,29 @@ check(
     "status over window still renders",
     ctx_status({"input_tokens": 300_000}, 200_000),
     "context 300k/200k (150%)",
+)
+
+check(
+    "owui usage normalization",
+    owui_usage(USAGE),
+    {
+        "prompt_tokens": 2 + 476 + 62028,
+        "completion_tokens": 825,
+        "total_tokens": 2 + 476 + 62028 + 825,
+        "cache_read_input_tokens": 62028,
+        "cache_creation_input_tokens": 476,
+    },
+)
+check(
+    "owui usage null fields",
+    owui_usage({"input_tokens": 10, "output_tokens": None}),
+    {
+        "prompt_tokens": 10,
+        "completion_tokens": 0,
+        "total_tokens": 10,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+    },
 )
 
 check("dur seconds", fmt_dur(4_200), "4s")
