@@ -667,14 +667,21 @@ def _format_tool_result(content: Any) -> str:
 def _iter_artifact_files(scan_dirs: List[Path]) -> "list[Path]":
     """Yield image/document artifacts from each scan dir. Workdir is searched
     recursively; other dirs (typically /tmp) are searched non-recursively to
-    avoid picking up unrelated files under nested system caches."""
+    avoid picking up unrelated files under nested system caches.
+
+    Non-workdir dirs match images only: the /tmp scan exists because agents
+    save matplotlib/PIL output there from habit, but matching documents there
+    too published every fetched-page scratch dump (.html/.txt) as an
+    artifact. Document deliverables belong in the workdir, which keeps the
+    full extension set."""
     seen: List[Path] = []
     for idx, root in enumerate(scan_dirs):
         if not root.exists():
             continue
         iterator = root.rglob("*") if idx == 0 else root.iterdir()
+        extensions = _ARTIFACT_EXTENSIONS if idx == 0 else _IMAGE_EXTENSIONS
         for path in iterator:
-            if path.is_file() and path.suffix.lower() in _ARTIFACT_EXTENSIONS:
+            if path.is_file() and path.suffix.lower() in extensions:
                 seen.append(path)
     return seen
 
@@ -721,6 +728,7 @@ def _inline_new_artifacts(
         return [f"\n\n_(File store unavailable: {exc})_\n"]
 
     chunks: List[str] = []
+    doc_links: List[str] = []
     for path in sorted(_iter_artifact_files(scan_dirs)):
         try:
             mtime = path.stat().st_mtime_ns
@@ -782,9 +790,15 @@ def _inline_new_artifacts(
             chunks.append(f"\n\n![{path.name}](/api/v1/files/{file_id}/content)\n")
         else:
             kib = size // 1024
-            chunks.append(
-                f"\n\n📎 [{path.name}](/api/v1/files/{file_id}/content) · {kib} KiB\n"
+            doc_links.append(
+                f"[{path.name}](/api/v1/files/{file_id}/content) ({kib} KiB)"
             )
+    # One compact paragraph for all document links instead of a block per
+    # file: multi-file turns were eating a screenful of chat. Not a <details>
+    # toggle — Conduit renders raw HTML literally.
+    if doc_links:
+        label = "file" if len(doc_links) == 1 else f"{len(doc_links)} files"
+        chunks.append(f"\n\n📎 {label}: " + " · ".join(doc_links) + "\n")
     return chunks
 
 
