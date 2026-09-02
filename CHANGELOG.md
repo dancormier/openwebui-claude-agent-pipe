@@ -15,7 +15,9 @@ comments and the homelab PRs that introduced them.
   no-answer shape (timeout, cancel, closed tab, socket error) becomes one
   `unanswered` result the prompt tells the agent to proceed past. `pipe()`
   now declares `__event_call__`; pure helpers in `src/34_askuser.py`,
-  covered by `test_askuser.py`.
+  covered by `test_askuser.py`. The server is registered with `alwaysLoad`
+  so the tool and its description sit in the prompt instead of behind
+  Claude Code's ToolSearch deferral, where the model never looked for it.
 - Subagent visibility: a `Task`/`Agent` call registers a subagent; its tool calls
   show as `↳ <agent> · 🔧 …` in the status line and heartbeat; its result
   closes it with `✅ <agent> · N tools · Ns`; the Done line counts
