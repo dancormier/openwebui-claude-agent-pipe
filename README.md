@@ -40,6 +40,8 @@ matter on first install:
   `#repo:` sessions, which otherwise load only the target repo's `CLAUDE.md`.
   Empty by default; set it if you use `REPO_MAP`.
 - `REPO_MAP` — `name=path` allowlist for `#repo:<name>` chats.
+- `SESSION_SEARCH` — registers `search_chats` / `read_chat` so the agent can look
+  up the user's earlier chats (read-only, scoped to that user; sqlite only).
 - `ASK_USER` — registers an `ask_user` tool so the agent can ask multiple-choice
   questions mid-turn via Open WebUI's question form; clients without a socket
   session get the questions as markdown and answer in the next message.
