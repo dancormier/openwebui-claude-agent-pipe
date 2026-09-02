@@ -21,17 +21,25 @@ patches below on top of it. Split out of the `homelab` repo's `hub/pipe/` on
 - `test_*.py` — standalone suites, stdlib only, no pytest: `python3 test_sessions.py`
   (optionally against a deployed copy: `python3 test_sessions.py <pipe.py>`).
 
-## Setup-specific defaults
+## Configuration
 
-Two valves default to one particular machine's layout and are the first things
-another deployment changes: `GATEWAY_CONTRACT` (`~/homelab/hub/AGENTS.md`, the
-rules file injected into every turn) and the `REPO_MAP` example paths in its
-description. Everything else is generic Open WebUI / SDK configuration.
+Everything is a valve (Admin → Functions → claude_code → Valves). The ones that
+matter on first install:
+
+- `CLAUDE_CODE_OAUTH_TOKEN` — from `claude setup-token`; this is the sanctioned
+  path for running the SDK on a Claude subscription.
+- `WORKDIR_ROOT` — parent directory for per-chat workspaces.
+- `PERMISSION_MODE` — defaults to `bypassPermissions`; the agent runs as the
+  Open WebUI process user with no prompts, so your rules file is the guardrail.
+- `GATEWAY_CONTRACT_PATH` — a rules file appended to the system prompt for
+  `#repo:` sessions, which otherwise load only the target repo's `CLAUDE.md`.
+  Empty by default; set it if you use `REPO_MAP`.
+- `REPO_MAP` — `name=path` allowlist for `#repo:<name>` chats.
 
 ## Patches on top of upstream
 
 1. **no-KB crash fix** — `_build_kb_mcp_server` returned a 2-tuple on the
-   no-knowledge path; callers unpack 3 (`return None, [], {}`). Not filed upstream (Dan's call).
+   no-knowledge path; callers unpack 3 (`return None, [], {}`). Not filed upstream.
 2. **Multi-model** — `MODELS` valve exposes extra Claude models as separate
    picker entries; `_resolve_model()` maps the invoked id per request.
 3. **`INLINE_TOOL_DETAILS` valve** — set False to suppress inline `<details>`
@@ -94,17 +102,20 @@ description. Everything else is generic Open WebUI / SDK configuration.
 
 Note: repo-rooted chats (#repo:) don't surface files created in the repo cwd as chat attachments — the artifact scanner deliberately walks only the scratch workdir and /tmp.
 
-Note: Hook verification: homelab's `scripts/verify-pipe-hooks.sh` proves the deny-secret-exfil PreToolUse hook fires for pipe-like headless runs and that no Home Assistant actuation connector tool is callable in them (the `permissions.deny` list in `claude/settings.json` matches exact tool names, so a renamed connector would otherwise un-deny them silently).
+Note: Hook verification: because the agent runs with bypassPermissions, the author's setup runs a daily canary (`verify-pipe-hooks.sh` in the homelab repo) that proves the deny-secret-exfil PreToolUse hook fires for pipe-like headless runs and that no Home Assistant actuation connector tool is callable in them (the `permissions.deny` list in `claude/settings.json` matches exact tool names, so a renamed connector would otherwise un-deny them silently).
 
 ## Deploying
 
 Merging here deploys nothing: Open WebUI runs the copy stored in `webui.db`.
-The deploy tooling lives in the `homelab` repo, which reads this checkout via
-`PIPE_DIR` (default `~/Developer/openwebui-claude-agent-pipe`):
-`source ~/.secrets && ~/homelab/scripts/deploy-pipe.sh` backs up the deployed
-copy, posts this checkout's copy, verifies parity, and runs the suites against
-the deployed copy. Or paste into Admin → Functions. Valve state lives in
-`webui.db`, not here — homelab's `scripts/set-repo-map.sh` updates `REPO_MAP`.
+Post `claude_agent_pipe.py` as the content of function `claude_code` via the
+admin API (`POST /api/v1/functions/id/claude_code/update`, admin bearer token)
+or paste it into Admin → Functions. Valve state lives in `webui.db`, not here,
+and survives redeploys.
+
+The author's wrapper lives in the `homelab` repo and reads this checkout via
+`PIPE_DIR` (default `~/Developer/openwebui-claude-agent-pipe`): it backs up the
+deployed copy, posts this one, verifies parity, and runs the suites against the
+deployed copy.
 
 Known-value redaction (2026-08-21): the patterns are prefix-anchored and cannot
 recognise a uuid token, an ntfy topic or a password, so the two job workers and
