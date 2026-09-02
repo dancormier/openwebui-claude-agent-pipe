@@ -82,8 +82,13 @@ check("fields clamped to the form's limits", len(n1["question"]) == 500 and len(
 check("rejects empty list", raises(mod._normalize_questions, []) is not None)
 check("rejects non-list", raises(mod._normalize_questions, "q?") is not None)
 check("rejects five questions", "at most 4" in (raises(mod._normalize_questions, [Q[0]] * 5) or ""))
-check("rejects one option", "2-3 options" in (raises(mod._normalize_questions, [{"question": "q", "options": [{"label": "a"}]}]) or ""))
-check("rejects four options", "2-3 options" in (raises(mod._normalize_questions, [{"question": "q", "options": ["a", "b", "c", "d"]}]) or ""))
+check("rejects four options", "at most 3" in (raises(mod._normalize_questions, [{"question": "q", "options": ["a", "b", "c", "d"]}]) or ""))
+free = mod._normalize_questions([{"question": "Which restaurant?", "allow_other": False}, {"question": "q", "options": ["only"], "allow_other": False}])
+check("no options → free text, allow_other forced on", free[0]["options"] == [] and free[0]["allow_other"] is True)
+check("one option → allow_other forced on", len(free[1]["options"]) == 1 and free[1]["allow_other"] is True)
+fmd = mod._render_questions_markdown(free)
+check("free-text question renders a type-your-answer line", "1. **Question 1** — Which restaurant?\n   - type your answer\n" in fmd, fmd)
+check("reply hint mixes typed and lettered picks", fmd.rstrip().endswith("e.g. `1: …, 2a`."), fmd)
 check("rejects missing question text", "question text" in (raises(mod._normalize_questions, [{"options": ["a", "b"]}]) or ""))
 check("rejects blank label", "label" in (raises(mod._normalize_questions, [{"question": "q", "options": [{"label": " "}, "b"]}]) or ""))
 check("rejects duplicate ids", "duplicate" in (raises(mod._normalize_questions, [{"id": "x", "question": "q", "options": ["a", "b"]}] * 2) or ""))
@@ -110,7 +115,15 @@ check("answers mapped and stripped", r == {"status": "answered", "answers": {"q1
 r = mod._map_user_input_response({"answers": {"q1": "Only auth", "busy": ""}}, norm)
 check("blank answer reported as skipped", r["status"] == "answered" and r["skipped"] == ["busy"], r)
 r = mod._map_user_input_response({"answers": {"q1": "my own words"}}, norm)
-check("free-text answer passes through", r["answers"]["q1"] == "my own words")
+check("bare string answer passes through", r["answers"]["q1"] == "my own words")
+r = mod._map_user_input_response({"answers": {
+    "q1": {"type": "option", "option_index": 1, "label": "Auth and sessions", "description": "Both tables move"},
+    "busy": {"type": "other", "text": "  wait 5 min "},
+}}, norm)
+check("form option object → its label", r["answers"]["q1"] == "Auth and sessions", r)
+check("form other object → its text, stripped", r["answers"]["busy"] == "wait 5 min", r)
+r = mod._map_user_input_response({"answers": {"q1": {"type": "other", "text": "  "}}}, norm)
+check("blank other text → unanswered", r["status"] == "unanswered")
 for name, out in [
     ("error", {"error": "timed out"}),
     ("cancelled", {"status": "cancelled"}),

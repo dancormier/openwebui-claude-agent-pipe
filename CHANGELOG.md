@@ -18,6 +18,10 @@ comments and the homelab PRs that introduced them.
   covered by `test_askuser.py`. The server is registered with `alwaysLoad`
   so the tool and its description sit in the prompt instead of behind
   Claude Code's ToolSearch deferral, where the model never looked for it.
+  Answers are unwrapped from the form's `{type:"option",label}` /
+  `{type:"other",text}` objects; a question with no options is a free-text
+  field; the prompt makes the tool the channel for any question the reply
+  would otherwise end on.
 - Subagent visibility: a `Task`/`Agent` call registers a subagent; its tool calls
   show as `↳ <agent> · 🔧 …` in the status line and heartbeat; its result
   closes it with `✅ <agent> · N tools · Ns`; the Done line counts
