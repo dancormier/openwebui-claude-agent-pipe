@@ -6,6 +6,16 @@ comments and the homelab PRs that introduced them.
 
 ## Unreleased (2026-09-02)
 
+- `ask_user` tool (`ASK_USER` valve, default on): the agent can pause
+  mid-turn and ask up to 4 multiple-choice questions. With a browser socket
+  session the pipe sends Open WebUI's own `request:user_input` event and
+  the answers flow back into the same turn; without one (mobile apps, API
+  callers) the tool returns the questions as numbered markdown for the agent
+  to put in its reply, and the user answers in the next message. Every
+  no-answer shape (timeout, cancel, closed tab, socket error) becomes one
+  `unanswered` result the prompt tells the agent to proceed past. `pipe()`
+  now declares `__event_call__`; pure helpers in `src/34_askuser.py`,
+  covered by `test_askuser.py`.
 - Subagent visibility: a `Task`/`Agent` call registers a subagent; its tool calls
   show as `↳ <agent> · 🔧 …` in the status line and heartbeat; its result
   closes it with `✅ <agent> · N tools · Ns`; the Done line counts

@@ -544,6 +544,170 @@ def _extract_effort_prefix(prompt: str) -> Tuple[Optional[str], str]:
     return m.group(1).lower(), stripped[m.end():].lstrip()
 
 
+# ---------------------------------------------------------------------------
+# ask_user: the pure half. Normalizes the agent's question list into the
+# payload Open WebUI's `request:user_input` event expects (its own builtin
+# ask_user in open_webui/tools/builtin.py sets the field limits), renders the
+# same questions as markdown for clients with no form (Conduit, API callers,
+# anything without a socket session), and maps the form's reply into the
+# tool result. No SDK or Open WebUI imports so the head-slice suites reach it.
+# ---------------------------------------------------------------------------
+
+_ASK_USER_TOOL = "mcp__ask-user__ask_user"
+_ASK_USER_MAX_QUESTIONS = 4
+_ASK_USER_MIN_OPTIONS = 2
+_ASK_USER_MAX_OPTIONS = 3
+_ASK_USER_TIMEOUT_MS = 180_000
+_ASK_USER_UNANSWERED_INSTRUCTION = (
+    "The user did not answer. Proceed on your best assumption and say "
+    "which one you took."
+)
+_ASK_USER_NO_UI_INSTRUCTION = (
+    "This client has no question form. Put the ask_in_reply text in your "
+    "reply verbatim, then end the turn without doing the work; the user's "
+    "next message carries the answers."
+)
+
+
+def _normalize_questions(raw: Any) -> List[Dict[str, Any]]:
+    """Validate and clamp the agent's questions to the form's limits.
+    Raises ValueError with a message the agent can act on."""
+    if not isinstance(raw, list) or not raw:
+        raise ValueError("questions must be a non-empty list")
+    if len(raw) > _ASK_USER_MAX_QUESTIONS:
+        raise ValueError(f"at most {_ASK_USER_MAX_QUESTIONS} questions per call")
+    out: List[Dict[str, Any]] = []
+    seen: Set[str] = set()
+    for index, q in enumerate(raw, 1):
+        if not isinstance(q, dict):
+            raise ValueError(f"question {index} must be an object")
+        text = str(q.get("question") or "").strip()[:500]
+        if not text:
+            raise ValueError(f"question {index} needs question text")
+        options = q.get("options")
+        if not isinstance(options, list) or not (
+            _ASK_USER_MIN_OPTIONS <= len(options) <= _ASK_USER_MAX_OPTIONS
+        ):
+            raise ValueError(
+                f"question {index} needs {_ASK_USER_MIN_OPTIONS}-"
+                f"{_ASK_USER_MAX_OPTIONS} options"
+            )
+        norm_options = []
+        for opt in options:
+            if isinstance(opt, str):
+                opt = {"label": opt}
+            if not isinstance(opt, dict):
+                raise ValueError(f"question {index}: each option must be an object")
+            label = str(opt.get("label") or "").strip()[:80]
+            if not label:
+                raise ValueError(f"question {index}: each option needs a label")
+            norm_options.append(
+                {
+                    "label": label,
+                    "description": str(opt.get("description") or "").strip()[:240],
+                }
+            )
+        qid = str(q.get("id") or f"q{index}").strip()[:64]
+        if qid in seen:
+            raise ValueError(f"duplicate question id: {qid}")
+        seen.add(qid)
+        out.append(
+            {
+                "id": qid,
+                "header": str(q.get("header") or "").strip()[:48]
+                or f"Question {index}",
+                "question": text,
+                "options": norm_options,
+                "allow_other": bool(q.get("allow_other", True)),
+            }
+        )
+    return out
+
+
+def _render_questions_markdown(questions: List[Dict[str, Any]]) -> str:
+    """The no-form rendering: numbered questions, lettered options, so a
+    one-line reply like `1b, 2a` is unambiguous."""
+    lines: List[str] = []
+    for n, q in enumerate(questions, 1):
+        lines.append(f"{n}. **{q['header']}** — {q['question']}")
+        for letter, opt in zip("abc", q["options"]):
+            desc = f" — {opt['description']}" if opt["description"] else ""
+            lines.append(f"   - ({letter}) {opt['label']}{desc}")
+        if q["allow_other"]:
+            lines.append("   - or type your own answer")
+        lines.append("")
+    picks = ", ".join(f"{n}a" for n in range(1, len(questions) + 1))
+    lines.append(f"Reply with your picks, e.g. `{picks}`.")
+    return "\n".join(lines)
+
+
+def _user_input_payload(
+    questions: List[Dict[str, Any]], timeout_ms: int = _ASK_USER_TIMEOUT_MS
+) -> Dict[str, Any]:
+    if not isinstance(timeout_ms, int) or not 60_000 <= timeout_ms <= 240_000:
+        timeout_ms = _ASK_USER_TIMEOUT_MS
+    return {
+        "type": "request:user_input",
+        "data": {
+            "questions": questions,
+            "allow_other": any(q["allow_other"] for q in questions),
+            "timeout_ms": timeout_ms,
+        },
+    }
+
+
+def _map_user_input_response(
+    output: Any, questions: List[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """Turn the form's reply into the tool result. Every failure shape —
+    error, cancel, timeout, malformed — collapses to `unanswered` so the
+    agent has exactly one fallback to follow."""
+    if not isinstance(output, dict):
+        return {"status": "unanswered", "reason": "no response",
+                "instruction": _ASK_USER_UNANSWERED_INSTRUCTION}
+    if output.get("error"):
+        return {"status": "unanswered", "reason": str(output["error"]),
+                "instruction": _ASK_USER_UNANSWERED_INSTRUCTION}
+    if output.get("status") == "cancelled":
+        return {"status": "unanswered", "reason": "cancelled",
+                "instruction": _ASK_USER_UNANSWERED_INSTRUCTION}
+    raw = output.get("answers")
+    if not isinstance(raw, dict):
+        return {"status": "unanswered", "reason": "no answers",
+                "instruction": _ASK_USER_UNANSWERED_INSTRUCTION}
+    answers: Dict[str, str] = {}
+    for q in questions:
+        value = raw.get(q["id"])
+        if value is None or str(value).strip() == "":
+            continue
+        answers[q["id"]] = str(value).strip()
+    if not answers:
+        return {"status": "unanswered", "reason": "empty answers",
+                "instruction": _ASK_USER_UNANSWERED_INSTRUCTION}
+    result: Dict[str, Any] = {"status": "answered", "answers": answers}
+    skipped = [q["id"] for q in questions if q["id"] not in answers]
+    if skipped:
+        result["skipped"] = skipped
+    return result
+
+
+def _no_ui_result(questions: List[Dict[str, Any]]) -> Dict[str, Any]:
+    return {
+        "status": "no_ui",
+        "ask_in_reply": _render_questions_markdown(questions),
+        "instruction": _ASK_USER_NO_UI_INSTRUCTION,
+    }
+
+
+def _ask_user_preview(tool_input: Dict[str, Any]) -> str:
+    questions = tool_input.get("questions")
+    if isinstance(questions, list) and questions:
+        first = questions[0]
+        if isinstance(first, dict):
+            return str(first.get("question") or first.get("header") or "")
+    return ""
+
+
 _TOOL_PREVIEW_FIELDS = {
     "Bash": "command",
     "Read": "file_path",
@@ -557,10 +721,15 @@ _TOOL_PREVIEW_FIELDS = {
     "Agent": "description",
 }
 
+_TOOL_PREVIEW_CUSTOM = {_ASK_USER_TOOL: _ask_user_preview}
+
 
 def _tool_preview(name: str, tool_input: Dict[str, Any]) -> str:
     key = _TOOL_PREVIEW_FIELDS.get(name)
-    if key and key in tool_input:
+    custom = _TOOL_PREVIEW_CUSTOM.get(name)
+    if custom:
+        raw = custom(tool_input)
+    elif key and key in tool_input:
         raw = str(tool_input[key])
     elif tool_input:
         raw = ", ".join(f"{k}={str(v)[:40]}" for k, v in list(tool_input.items())[:2])
@@ -1625,6 +1794,106 @@ _FILE_EXT_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+
+def _build_ask_user_mcp_server(
+    event_call: Optional[Callable], timeout_ms: int = _ASK_USER_TIMEOUT_MS
+):
+    """Return (mcp_config, tool_names) for the ask_user tool. Registered even
+    without an event_call: the tool then hands the questions back as markdown
+    for the agent to ask in its reply, so clients with no form still get
+    asked instead of guessed at."""
+
+    @tool(
+        "ask_user",
+        (
+            "Ask the user up to 4 multiple-choice questions and wait for the "
+            "answers. Use only when a real ambiguity would change the work "
+            "materially; otherwise decide and say what you assumed. Each "
+            "option needs a short label; put your recommendation and its "
+            "reason in that option's description."
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "questions": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": _ASK_USER_MAX_QUESTIONS,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "string"},
+                            "header": {
+                                "type": "string",
+                                "description": "Tab title, a few words",
+                            },
+                            "question": {"type": "string"},
+                            "options": {
+                                "type": "array",
+                                "minItems": _ASK_USER_MIN_OPTIONS,
+                                "maxItems": _ASK_USER_MAX_OPTIONS,
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "label": {"type": "string"},
+                                        "description": {"type": "string"},
+                                    },
+                                    "required": ["label"],
+                                },
+                            },
+                            "allow_other": {
+                                "type": "boolean",
+                                "description": "Offer a free-text answer (default true)",
+                            },
+                        },
+                        "required": ["question", "options"],
+                    },
+                }
+            },
+            "required": ["questions"],
+        },
+    )
+    async def _ask(args: Dict[str, Any]) -> Dict[str, Any]:
+        try:
+            questions = _normalize_questions(args.get("questions"))
+        except ValueError as exc:
+            return {
+                "content": [{"type": "text", "text": f"ask_user: {exc}"}],
+                "is_error": True,
+            }
+        if event_call is None:
+            result = _no_ui_result(questions)
+        else:
+            try:
+                output = await event_call(_user_input_payload(questions, timeout_ms))
+            except Exception as exc:
+                log.warning("ask_user event_call failed: %s", exc)
+                output = {"error": f"{type(exc).__name__}: {exc}"}
+            result = _map_user_input_response(output, questions)
+        return {
+            "content": [
+                {"type": "text", "text": json.dumps(result, ensure_ascii=False)}
+            ]
+        }
+
+    server = create_sdk_mcp_server("ask-user", "0.1", tools=[_ask])
+    return server, [_ASK_USER_TOOL]
+
+
+_ASK_USER_PROMPT = (
+    "You have an `ask_user` tool that shows the user a short multiple-choice "
+    "form and waits for the answers. Use it only when a genuine ambiguity "
+    "would waste a long turn or lead to materially different work; for "
+    "routine judgment calls, decide and say what you assumed. One call per "
+    "turn, at most 4 questions, 2-3 options each, your recommendation and "
+    "its reason in that option's description. It is not an approval "
+    "channel: a confirmation the rules require still ends the turn as a "
+    "plain question and waits for an explicit yes. If the result's status "
+    "is `no_ui`, put its `ask_in_reply` text in your reply verbatim and end "
+    "the turn; the next user message carries the answers. If the status is "
+    "`unanswered`, proceed on your best assumption and say which you took."
+)
+
 _MODE_PREFIXES = ("/agent", "/fast")
 
 
@@ -1880,6 +2149,16 @@ class Pipe:
                 "outside WORKDIR_ROOT (a #repo: session), where the agent would "
                 "otherwise load only that repo's CLAUDE.md and never see the "
                 "gateway's Hard Rules. Empty disables the append."
+            ),
+        )
+        ASK_USER: bool = Field(
+            default=True,
+            description=(
+                "Register the ask_user tool: the agent can pause mid-turn and "
+                "show a multiple-choice form (Open WebUI's request:user_input "
+                "event). Clients without a socket session (mobile apps, API "
+                "callers) get the questions as markdown in the reply and "
+                "answer in the next message instead."
             ),
         )
         MAX_TURNS: int = Field(
@@ -2390,6 +2669,7 @@ class Pipe:
         __files__: Optional[List[Dict[str, Any]]] = None,
         __user__: Optional[Dict[str, Any]] = None,
         __metadata__: Optional[Dict[str, Any]] = None,
+        __event_call__: Optional[Callable] = None,
     ) -> AsyncGenerator[str, None]:
         """Public entrypoint. Scrubs secrets from everything leaving the pipe.
 
@@ -2412,7 +2692,7 @@ class Pipe:
         # is the safe direction — it withholds text rather than emitting it.
         async for chunk in self._pipe_stream(
             body, __chat_id__, emitter, __files__, __user__, __metadata__,
-            turn_info=turn_info,
+            turn_info=turn_info, event_call=__event_call__,
         ):
             safe = redactor.feed(chunk)
             if safe:
@@ -2502,6 +2782,7 @@ class Pipe:
         __metadata__: Optional[Dict[str, Any]] = None,
         *,
         turn_info: Optional[Dict[str, Any]] = None,
+        event_call: Optional[Callable] = None,
         _no_resume: bool = False,
     ) -> AsyncGenerator[str, None]:
         # Auth selection:
@@ -2658,6 +2939,13 @@ class Pipe:
             event_emitter=__event_emitter__,
         )
         allowed_tools = allowed_tools + kb_tool_names
+        mcp_servers: Dict[str, Any] = {}
+        if kb_server is not None:
+            mcp_servers["helm-kb"] = kb_server
+        if self.valves.ASK_USER:
+            ask_server, ask_tool_names = _build_ask_user_mcp_server(event_call)
+            mcp_servers["ask-user"] = ask_server
+            allowed_tools = allowed_tools + ask_tool_names
 
         options_kwargs: Dict[str, Any] = {
             "cwd": str(cwd),
@@ -2681,8 +2969,8 @@ class Pipe:
             options_kwargs["max_buffer_size"] = (
                 self.valves.MAX_BUFFER_MB * 1024 * 1024
             )
-        if kb_server is not None:
-            options_kwargs["mcp_servers"] = {"helm-kb": kb_server}
+        if mcp_servers:
+            options_kwargs["mcp_servers"] = mcp_servers
         effort = effort_override or self.valves.EFFORT.strip().lower() or None
         if effort in _EFFORT_LEVELS:
             options_kwargs["effort"] = effort
@@ -2721,6 +3009,8 @@ class Pipe:
         system_prompt = _extract_system_prompt(body)
         if system_prompt:
             append_parts.append(system_prompt)
+        if self.valves.ASK_USER:
+            append_parts.append(_ASK_USER_PROMPT)
         if not chat_id:
             # Keyless callers are mobile/voice surfaces (Conduit): small
             # screens, often TTS. Nudge hard toward brevity.
@@ -2927,7 +3217,7 @@ class Pipe:
                 async for chunk in self._pipe_stream(
                     body, __chat_id__, __event_emitter__, __files__,
                     __user__, __metadata__,
-                    turn_info=turn_info, _no_resume=True,
+                    turn_info=turn_info, event_call=event_call, _no_resume=True,
                 ):
                     yield chunk
                 return

@@ -57,6 +57,16 @@
                 "gateway's Hard Rules. Empty disables the append."
             ),
         )
+        ASK_USER: bool = Field(
+            default=True,
+            description=(
+                "Register the ask_user tool: the agent can pause mid-turn and "
+                "show a multiple-choice form (Open WebUI's request:user_input "
+                "event). Clients without a socket session (mobile apps, API "
+                "callers) get the questions as markdown in the reply and "
+                "answer in the next message instead."
+            ),
+        )
         MAX_TURNS: int = Field(
             default=30,
             description="Maximum agent turns per user message. 0 disables the cap.",
@@ -565,6 +575,7 @@
         __files__: Optional[List[Dict[str, Any]]] = None,
         __user__: Optional[Dict[str, Any]] = None,
         __metadata__: Optional[Dict[str, Any]] = None,
+        __event_call__: Optional[Callable] = None,
     ) -> AsyncGenerator[str, None]:
         """Public entrypoint. Scrubs secrets from everything leaving the pipe.
 
@@ -587,7 +598,7 @@
         # is the safe direction — it withholds text rather than emitting it.
         async for chunk in self._pipe_stream(
             body, __chat_id__, emitter, __files__, __user__, __metadata__,
-            turn_info=turn_info,
+            turn_info=turn_info, event_call=__event_call__,
         ):
             safe = redactor.feed(chunk)
             if safe:
@@ -677,6 +688,7 @@
         __metadata__: Optional[Dict[str, Any]] = None,
         *,
         turn_info: Optional[Dict[str, Any]] = None,
+        event_call: Optional[Callable] = None,
         _no_resume: bool = False,
     ) -> AsyncGenerator[str, None]:
         # Auth selection:
@@ -833,6 +845,13 @@
             event_emitter=__event_emitter__,
         )
         allowed_tools = allowed_tools + kb_tool_names
+        mcp_servers: Dict[str, Any] = {}
+        if kb_server is not None:
+            mcp_servers["helm-kb"] = kb_server
+        if self.valves.ASK_USER:
+            ask_server, ask_tool_names = _build_ask_user_mcp_server(event_call)
+            mcp_servers["ask-user"] = ask_server
+            allowed_tools = allowed_tools + ask_tool_names
 
         options_kwargs: Dict[str, Any] = {
             "cwd": str(cwd),
@@ -856,8 +875,8 @@
             options_kwargs["max_buffer_size"] = (
                 self.valves.MAX_BUFFER_MB * 1024 * 1024
             )
-        if kb_server is not None:
-            options_kwargs["mcp_servers"] = {"helm-kb": kb_server}
+        if mcp_servers:
+            options_kwargs["mcp_servers"] = mcp_servers
         effort = effort_override or self.valves.EFFORT.strip().lower() or None
         if effort in _EFFORT_LEVELS:
             options_kwargs["effort"] = effort
@@ -896,6 +915,8 @@
         system_prompt = _extract_system_prompt(body)
         if system_prompt:
             append_parts.append(system_prompt)
+        if self.valves.ASK_USER:
+            append_parts.append(_ASK_USER_PROMPT)
         if not chat_id:
             # Keyless callers are mobile/voice surfaces (Conduit): small
             # screens, often TTS. Nudge hard toward brevity.
@@ -1102,7 +1123,7 @@
                 async for chunk in self._pipe_stream(
                     body, __chat_id__, __event_emitter__, __files__,
                     __user__, __metadata__,
-                    turn_info=turn_info, _no_resume=True,
+                    turn_info=turn_info, event_call=event_call, _no_resume=True,
                 ):
                     yield chunk
                 return
