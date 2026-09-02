@@ -94,6 +94,10 @@ class _TurnState:
         self.last_usage: Optional[Dict[str, Any]] = None
         self.tool_count = 0
         self.turn_session_id: Optional[str] = None
+        # Running subagents keyed by their Task tool_use_id — the id every
+        # message they produce carries as parent_tool_use_id.
+        self.agents: Dict[str, Dict[str, Any]] = {}
+        self.agent_count = 0
 
     def note_assistant(
         self, main_thread: bool, usage: Optional[Dict[str, Any]], tool_uses: int
@@ -158,6 +162,12 @@ def _on_stream_event(ev: Dict[str, Any], state: _TurnState, inline_details: bool
     return chunks, status
 
 
+def _agent_label(tool_input: Dict[str, Any]) -> str:
+    kind = str(tool_input.get("subagent_type") or "agent")
+    desc = str(tool_input.get("description") or "").strip()
+    return f"{kind}: {desc}" if desc else kind
+
+
 def _on_tool_use(
     name: str,
     tool_input: Dict[str, Any],
@@ -165,17 +175,31 @@ def _on_tool_use(
     state: _TurnState,
     inline_details: bool,
     now: float,
+    parent_id: Optional[str] = None,
 ) -> _Handled:
     """A completed tool call → status line, heartbeat registration, and the
-    collapsed input block. The <summary> is plain text on purpose: Open WebUI
-    strips inline HTML inside it and escapes its content itself, so neither
-    tags nor pre-escaping survive."""
+    collapsed input block. A `Task` call registers a subagent; calls made by
+    a subagent (parent_id set) are labeled under it. The <summary> is plain
+    text on purpose: Open WebUI strips inline HTML inside it and escapes its
+    content itself, so neither tags nor pre-escaping survive."""
     preview = _tool_preview(name, tool_input)
     label = f"{name}: {preview}" if preview else name
+    if name == "Task" and parent_id is None:
+        state.agents[tool_id] = {
+            "label": _agent_label(tool_input), "tools": 0, "started": now,
+        }
+        state.agent_count += 1
+        label = f"🤖 {state.agents[tool_id]['label']}"
+    agent = state.agents.get(parent_id) if parent_id else None
+    if agent:
+        agent["tools"] += 1
+        label = f"↳ {agent['label']} · {label}"
     state.active_tools[tool_id] = {"label": label, "started": now}
     chunks: List[str] = []
     if inline_details:
         summary_text = f"🔧 {name}" + (f" · {preview}" if preview else "")
+        if agent:
+            summary_text = f"↳ {agent['label']} · " + summary_text
         chunks.append(
             "\n\n<details>\n"
             f"<summary>{summary_text}</summary>\n\n"
@@ -191,10 +215,19 @@ def _on_tool_result(
     content: Any,
     state: _TurnState,
     inline_details: bool,
+    now: Optional[float] = None,
 ) -> _Handled:
     """A tool result → heartbeat release; errors render quietly, since the
-    agent usually retries and recovers."""
-    state.active_tools.pop(tool_use_id, None)
+    agent usually retries and recovers. The result of a `Task` call closes
+    that subagent with a one-line summary."""
+    started = (state.active_tools.pop(tool_use_id, None) or {}).get("started")
+    agent = state.agents.pop(tool_use_id, None)
+    if agent and not is_error:
+        elapsed = int(now - agent["started"]) if now is not None else 0
+        return [], (
+            f"✅ {agent['label']} · {agent['tools']} tool"
+            f"{'s' if agent['tools'] != 1 else ''} · {elapsed}s"
+        )
     if not is_error:
         return [], None
     if not inline_details:
@@ -235,12 +268,16 @@ def _context_from_usage(cu: Dict[str, Any]) -> str:
     return f"context {_fmt_tokens(used)}/{_fmt_tokens(window)} ({pct}%)"
 
 
-def _done_line(duration_ms: Optional[int], tool_count: int, ctx: str) -> str:
+def _done_line(
+    duration_ms: Optional[int], tool_count: int, ctx: str, agents: int = 0
+) -> str:
     parts: List[str] = []
     if duration_ms:
         parts.append(_fmt_duration(duration_ms))
     if tool_count:
         parts.append(f"{tool_count} tool{'s' if tool_count != 1 else ''}")
+    if agents:
+        parts.append(f"{agents} subagent{'s' if agents != 1 else ''}")
     if ctx:
         parts.append(ctx)
     return "Done · " + " · ".join(parts) if parts else "Done."

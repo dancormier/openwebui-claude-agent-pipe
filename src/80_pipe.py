@@ -982,6 +982,10 @@
                         continue
 
                     if isinstance(message, StreamEvent):
+                        # A subagent's own text is its report back to the main
+                        # thread, not the reply; it would stream as a duplicate.
+                        if message.parent_tool_use_id is not None:
+                            continue
                         chunks, status = _on_stream_event(message.event or {}, state, inline)
                         if status:
                             await emit_status(status)
@@ -1002,7 +1006,7 @@
                                 continue
                             chunks, status = _on_tool_use(
                                 block.name, block.input, block.id, state, inline,
-                                time.monotonic(),
+                                time.monotonic(), message.parent_tool_use_id,
                             )
                             if status:
                                 await emit_status(status)
@@ -1019,7 +1023,7 @@
                                 continue
                             chunks, status = _on_tool_result(
                                 block.tool_use_id, block.is_error, block.content,
-                                state, inline,
+                                state, inline, time.monotonic(),
                             )
                             if status:
                                 await emit_status(status)
@@ -1041,7 +1045,10 @@
                                 state.last_usage, self.valves.CONTEXT_WINDOW_TOKENS
                             )
                         await emit_status(
-                            _done_line(message.duration_ms, state.tool_count, ctx),
+                            _done_line(
+                                message.duration_ms, state.tool_count, ctx,
+                                state.agent_count,
+                            ),
                             done=True,
                         )
                         if state.last_usage:

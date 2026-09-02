@@ -6,6 +6,11 @@ comments and the homelab PRs that introduced them.
 
 ## Unreleased (2026-09-02)
 
+- Subagent visibility: a `Task` call registers a subagent; its tool calls
+  show as `↳ <agent> · 🔧 …` in the status line and heartbeat; its result
+  closes it with `✅ <agent> · N tools · Ns`; the Done line counts
+  subagents. Subagent text deltas no longer stream into the main reply
+  (they are the report back to the main thread, not the answer).
 - `_pipe_stream`'s per-message handling moved into `src/35_turn.py`: a
   `_TurnState` plus pure handlers (`_on_stream_event`, `_on_tool_use`,
   `_on_tool_result`, `_session_status`, `_done_line`, …) that return
