@@ -7,6 +7,10 @@ tools, behind a normal chat UI, billed to your Claude subscription. It is for
 one person (or one trusted admin) who already runs Open WebUI and wants Claude
 Code in it, on the web and on mobile clients, rather than only in a terminal.
 
+![A finished turn: the Done line with duration, tool count and context usage, then the Write and Bash tool calls and the script's output](docs/images/tool-turn.jpg)
+
+![The ask_user form: the agent asks where to back up to, with three options and a free-text field, and gets the answer in the same turn](docs/images/ask-user.jpg)
+
 ## Credit
 
 This is a fork of Thomas Friedel's
