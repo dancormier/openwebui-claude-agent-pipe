@@ -24,29 +24,6 @@ from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Set, Tup
 
 from pydantic import BaseModel, Field
 
-_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp"}
-_DOWNLOAD_EXTENSIONS = {
-    ".pdf",
-    ".csv",
-    ".tsv",
-    ".txt",
-    ".md",
-    ".json",
-    ".yaml",
-    ".yml",
-    ".html",
-    ".xml",
-    ".xlsx",
-    ".docx",
-    ".pptx",
-    ".zip",
-}
-_ARTIFACT_EXTENSIONS = _IMAGE_EXTENSIONS | _DOWNLOAD_EXTENSIONS
-# Safety cap to avoid uploading runaway files. Uploaded artifacts are served
-# via OpenWebUI's file endpoint, so they don't bloat the chat history even
-# when large — this is only a "don't accidentally ship a DVD ISO" guard.
-_MAX_ARTIFACT_BYTES = 50 * 1024 * 1024  # 50 MiB
-
 # ── Secret redaction ────────────────────────────────────────────────────────
 # Everything this pipe emits is persisted in webui.db chat history and synced
 # to mobile clients, so a secret that reaches the stream is a secret on disk
@@ -588,6 +565,29 @@ log = logging.getLogger(__name__)
 # map in-process so follow-up turns resume the same Claude Code session.
 _chat_sessions: Dict[str, str] = {}
 
+
+_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp"}
+_DOWNLOAD_EXTENSIONS = {
+    ".pdf",
+    ".csv",
+    ".tsv",
+    ".txt",
+    ".md",
+    ".json",
+    ".yaml",
+    ".yml",
+    ".html",
+    ".xml",
+    ".xlsx",
+    ".docx",
+    ".pptx",
+    ".zip",
+}
+_ARTIFACT_EXTENSIONS = _IMAGE_EXTENSIONS | _DOWNLOAD_EXTENSIONS
+# Safety cap to avoid uploading runaway files. Uploaded artifacts are served
+# via OpenWebUI's file endpoint, so they don't bloat the chat history even
+# when large — this is only a "don't accidentally ship a DVD ISO" guard.
+_MAX_ARTIFACT_BYTES = 50 * 1024 * 1024  # 50 MiB
 
 _TOOL_PREVIEW_FIELDS = {
     "Bash": "command",

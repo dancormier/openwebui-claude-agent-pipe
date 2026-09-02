@@ -6,6 +6,9 @@ comments and the homelab PRs that introduced them.
 
 ## Unreleased (2026-09-02)
 
+- Source split into `src/` modules assembled by `build.py`; the built file is
+  unchanged apart from the artifact-extension constants moving next to their
+  users, and the slice line the redaction consumers depend on is preserved.
 - Split into its own repository with history; `GATEWAY_CONTRACT_PATH` defaults
   to empty and the docs no longer assume the author's machine.
 - `requirements:` floor raised to `claude-agent-sdk>=0.2.116`, the version the
