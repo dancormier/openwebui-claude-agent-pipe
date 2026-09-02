@@ -18,7 +18,11 @@ jobs:
 
       # The suites slice the pipe's module head and exec it with pydantic
       # stubbed, so they need only the stdlib — no SDK install, no Open WebUI.
+      - name: Built file matches src/
+        run: python3 build.py --check
+
       - name: Compile
+        if: ${{ !cancelled() }}
         run: python3 -m py_compile claude_agent_pipe.py redact_stdin.py
 
       - name: Suites

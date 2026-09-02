@@ -12,8 +12,13 @@ patches below on top of it. Split out of the `homelab` repo's `hub/pipe/` on
 
 ## Files
 
-- `claude_agent_pipe.py` — the function. Single file by design: it deploys by
-  being posted to Open WebUI's admin API (or pasted into Admin → Functions).
+- `src/*.py` — the source, one module per concern, concatenated in filename
+  order. **Edit these, never the built file.**
+- `claude_agent_pipe.py` — the built function, committed because it is what
+  gets deployed and what the redaction consumers slice. `python3 build.py`
+  regenerates it; `python3 build.py --check` fails in CI when it is stale.
+  Single file by design: Open WebUI stores a function as one body, posted to
+  the admin API or pasted into Admin → Functions.
 - `redact_stdin.py` — a CLI over the pipe's own secret redactor, for job
   workers that deliver agent output outside the chat stream. It slices the
   redactor out of `claude_agent_pipe.py` at the SDK import line, so the two
