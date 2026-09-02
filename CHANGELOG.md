@@ -6,6 +6,12 @@ comments and the homelab PRs that introduced them.
 
 ## Unreleased (2026-09-02)
 
+- `_pipe_stream`'s per-message handling moved into `src/35_turn.py`: a
+  `_TurnState` plus pure handlers (`_on_stream_event`, `_on_tool_use`,
+  `_on_tool_result`, `_session_status`, `_done_line`, …) that return
+  `(chunks, status)`, covered by `test_turn.py`. The usage publish is
+  `Pipe._record_usage`. Rendering is unchanged; the tool-preview helpers moved
+  above the SDK import so the head-slice suites reach them.
 - Source split into `src/` modules assembled by `build.py`; the built file is
   unchanged apart from the artifact-extension constants moving next to their
   users, and the slice line the redaction consumers depend on is preserved.

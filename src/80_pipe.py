@@ -633,6 +633,40 @@
                 ", ".join(f"{k}×{hits.count(k)}" for k in sorted(set(hits))),
             )
 
+    async def _record_usage(
+        self,
+        usage_payload: Dict[str, int],
+        __event_emitter__: Optional[Callable],
+        __metadata__: Optional[Dict[str, Any]],
+    ) -> None:
+        """Publish the turn's usage twice: a chat:completion event for live
+        listeners (never persisted), and a direct write to the saved message —
+        the socket emitter's save_to_chat branch drops chat:completion, and the
+        message's ⓘ popover renders only from the saved `usage`. The upsert
+        merges keys, so the middleware's later {'done', 'output'} upsert keeps
+        it; isawaitable covers OWUI versions where the upsert is sync. Both
+        paths are best-effort: a failure here must not break the turn."""
+        if __event_emitter__ is not None:
+            try:
+                await __event_emitter__(
+                    {"type": "chat:completion", "data": {"usage": usage_payload}}
+                )
+            except Exception:
+                log.debug("usage emit failed", exc_info=True)
+        try:
+            chat_id_meta = (__metadata__ or {}).get("chat_id")
+            msg_id_meta = (__metadata__ or {}).get("message_id")
+            if chat_id_meta and msg_id_meta:
+                from open_webui.models.chats import Chats
+
+                res = Chats.upsert_message_to_chat_by_id_and_message_id(
+                    chat_id_meta, msg_id_meta, {"usage": usage_payload}, touch=False
+                )
+                if inspect.isawaitable(res):
+                    await res
+        except Exception:
+            log.debug("usage DB write failed", exc_info=True)
+
     async def _pipe_stream(
         self,
         body: Dict[str, Any],
@@ -898,42 +932,19 @@
         scan_dirs = [workdir, Path("/tmp")]
         artifact_snapshot = _snapshot_artifacts(scan_dirs)
 
-        # Buffer thinking deltas and emit the <details>…</details> wrapper as
-        # one atomic chunk at content_block_stop. Streaming the opener+content
-        # token-by-token is unreliable: CommonMark's HTML block terminates at
-        # blank lines, so thinking text with paragraph breaks strands the
-        # opening <details><summary> as literal text in some renderers. Reset
-        # at each message_start (indices restart per assistant message).
-        thinking_buffers: Dict[int, str] = {}
-
-        # Consecutive assistant text blocks (each narration beat between tool
-        # calls is its own block) would otherwise stream back-to-back with no
-        # separator — "…the vault note:Diff is exactly…". Emit a paragraph
-        # break at each new text block after the first; Markdown collapses
-        # blank lines, so an already-separated stream can't over-space.
-        text_emitted = False
-
-        # Heartbeat: when a tool starts, emit a status update every 5s showing
-        # elapsed time so the user sees that long-running commands (e.g. a 30s
-        # Bash) aren't stuck. Keyed by tool_use_id; completed tools removed on
-        # the matching ToolResultBlock.
-        active_tools: Dict[str, Dict[str, Any]] = {}
+        state = _TurnState()
         heartbeat_task: Optional[asyncio.Task] = None
+        inline = self.valves.INLINE_TOOL_DETAILS
 
+        # While a tool runs, restate elapsed time every 2s so a 30s Bash call
+        # reads as progress rather than a hang.
         async def _heartbeat() -> None:
             try:
-                while active_tools:
+                while state.active_tools:
                     await asyncio.sleep(2)
-                    if not active_tools:
+                    if not state.active_tools:
                         return
-                    oldest = min(active_tools.values(), key=lambda t: t["started"])
-                    elapsed = int(time.monotonic() - oldest["started"])
-                    count = len(active_tools)
-                    label = (
-                        oldest["label"]
-                        if count == 1
-                        else f"{count} tools · longest {oldest['label']}"
-                    )
+                    label, elapsed = _heartbeat_label(state.active_tools, time.monotonic())
                     log.debug("heartbeat tick: %s · %ss", label, elapsed)
                     await emit_status(f"⏳ {label} · running {elapsed}s…")
             except asyncio.CancelledError:
@@ -944,20 +955,6 @@
             if heartbeat_task is None or heartbeat_task.done():
                 heartbeat_task = asyncio.create_task(_heartbeat())
 
-        # Session id delivered by this turn's init message (keyed AND keyless
-        # callers) — consumed by keyless registration and resume-retry.
-        turn_session_id: Optional[str] = None
-
-        # Usage of the most recent main-thread API call. Its field sum IS the
-        # session's current context size; ResultMessage.usage cannot be used
-        # for this — it accumulates across every call in the turn, re-counting
-        # the cached prefix once per tool round. Fallback only: the primary
-        # context source is client.get_context_usage() at turn end.
-        last_usage: Optional[Dict[str, Any]] = None
-
-        # Main-thread tool calls this turn, for the Done line.
-        tool_count = 0
-
         try:
             async with ClaudeSDKClient(options=options) as client:
                 await client.query(prompt)
@@ -966,28 +963,18 @@
                         if message.subtype == "init":
                             session_id = message.data.get("session_id")
                             if session_id:
-                                turn_session_id = session_id
+                                state.turn_session_id = session_id
                                 if chat_id:
                                     _chat_sessions[chat_id] = session_id
                                     _save_session_meta(
                                         self.valves.WORKDIR_ROOT,
                                         chat_id,
-                                        {
-                                            "session_id": session_id,
-                                            "cwd": str(cwd),
-                                        },
+                                        {"session_id": session_id, "cwd": str(cwd)},
                                     )
-                            history = _strip_latest_user(
-                                body.get("messages") or []
-                            )
-                            if resume_id:
-                                await emit_status("Session: resumed")
-                            elif _history_fingerprint(history) != _EMPTY_FP:
-                                await emit_status(
-                                    "Session: cold start — history replayed"
-                                )
-                            else:
-                                await emit_status("Session: new chat")
+                            await emit_status(_session_status(
+                                bool(resume_id),
+                                _strip_latest_user(body.get("messages") or []),
+                            ))
                         elif message.subtype == "compact_boundary":
                             # Auto-compaction summarized earlier history — the
                             # context number will drop; say why.
@@ -995,202 +982,74 @@
                         continue
 
                     if isinstance(message, StreamEvent):
-                        ev = message.event or {}
-                        etype = ev.get("type")
-                        if etype == "message_start":
-                            thinking_buffers.clear()
-                        elif etype == "content_block_start":
-                            block = ev.get("content_block") or {}
-                            if block.get("type") == "thinking":
-                                thinking_buffers[ev.get("index", 0)] = ""
-                                await emit_status("💭 Thinking…")
-                            elif block.get("type") == "text" and text_emitted:
-                                yield "\n\n"
-                        elif etype == "content_block_delta":
-                            delta = ev.get("delta") or {}
-                            dt = delta.get("type")
-                            if dt == "text_delta":
-                                text = delta.get("text", "")
-                                if text:
-                                    text_emitted = True
-                                    yield text
-                            elif dt == "thinking_delta":
-                                idx = ev.get("index", 0)
-                                if idx in thinking_buffers:
-                                    thinking_buffers[idx] += delta.get("thinking", "")
-                            # signature_delta / input_json_delta: ignore. Tool input
-                            # is rendered once fully from AssistantMessage below.
-                        elif etype == "content_block_stop":
-                            idx = ev.get("index", 0)
-                            if idx in thinking_buffers:
-                                text = thinking_buffers.pop(idx).strip()
-                                if text and self.valves.INLINE_TOOL_DETAILS:
-                                    yield (
-                                        "\n\n<details>\n<summary>💭 Thinking</summary>\n\n"
-                                        f"{text}\n\n"
-                                        "</details>\n\n"
-                                    )
-                                elif text:
-                                    await emit_status("💭 thinking")
+                        chunks, status = _on_stream_event(message.event or {}, state, inline)
+                        if status:
+                            await emit_status(status)
+                        for chunk in chunks:
+                            yield chunk
                         continue
 
                     if isinstance(message, AssistantMessage):
-                        # Subagent (parent_tool_use_id set) calls run in their
-                        # own context windows — only main-thread usage reflects
-                        # this session.
-                        if message.parent_tool_use_id is None:
-                            if message.usage:
-                                last_usage = message.usage
-                            tool_count += sum(
-                                isinstance(b, ToolUseBlock)
-                                for b in message.content
-                            )
-                        # Text + thinking already streamed via StreamEvent. Only
-                        # emit tool-use previews here (we need the completed
-                        # input dict, which StreamEvent only has as partial JSON).
+                        state.note_assistant(
+                            message.parent_tool_use_id is None,
+                            message.usage,
+                            sum(isinstance(b, ToolUseBlock) for b in message.content),
+                        )
+                        # Text and thinking already streamed via StreamEvent;
+                        # tool input is only complete here.
                         for block in message.content:
-                            if isinstance(block, ToolUseBlock):
-                                preview = _tool_preview(block.name, block.input)
-                                label = (
-                                    f"{block.name}: {preview}"
-                                    if preview
-                                    else block.name
-                                )
-                                await emit_status(f"🔧 {label}")
-                                active_tools[block.id] = {
-                                    "label": label,
-                                    "started": time.monotonic(),
-                                }
-                                _ensure_heartbeat()
-                                # Render as a collapsed <details>: summary is
-                                # plain text (OpenWebUI's sanitizer strips
-                                # inline HTML like <strong>/<code> inside
-                                # <summary> and renders the tags as literal
-                                # text); expanding reveals the full tool
-                                # input as a language-tagged fenced code block.
-                                # Don't html.escape here — OpenWebUI escapes
-                                # <summary> content itself, so pre-escaping
-                                # would double-encode ("&lt;" → "&amp;lt;").
-                                summary_text = f"🔧 {block.name}" + (
-                                    f" · {preview}" if preview else ""
-                                )
-                                if self.valves.INLINE_TOOL_DETAILS:
-                                    tool_body = _tool_input_block(block.name, block.input)
-                                    yield (
-                                        "\n\n<details>\n"
-                                        f"<summary>{summary_text}</summary>\n\n"
-                                        f"{tool_body}\n\n"
-                                        "</details>\n\n"
-                                    )
+                            if not isinstance(block, ToolUseBlock):
+                                continue
+                            chunks, status = _on_tool_use(
+                                block.name, block.input, block.id, state, inline,
+                                time.monotonic(),
+                            )
+                            if status:
+                                await emit_status(status)
+                            _ensure_heartbeat()
+                            for chunk in chunks:
+                                yield chunk
                         continue
 
                     if isinstance(message, UserMessage):
-                        content = message.content
-                        if not isinstance(content, list):
+                        if not isinstance(message.content, list):
                             continue
-                        for block in content:
-                            if isinstance(block, ToolResultBlock):
-                                active_tools.pop(block.tool_use_id, None)
-                                if block.is_error:
-                                    # Tool errors are usually transient — Claude
-                                    # retries and recovers. Render as a quiet,
-                                    # collapsed detail so the red icon / big
-                                    # traceback doesn't alarm users.
-                                    err_text = _format_tool_result(block.content)[:800]
-                                    if self.valves.INLINE_TOOL_DETAILS:
-                                        yield (
-                                            "\n\n<details>\n<summary>"
-                                            "<sub>⚙️ tool hiccup (retrying)</sub>"
-                                            "</summary>\n\n"
-                                            f"```\n{err_text}\n```\n\n"
-                                            "</details>\n\n"
-                                        )
-                                    else:
-                                        await emit_status("⚙️ tool hiccup (retrying)")
+                        for block in message.content:
+                            if not isinstance(block, ToolResultBlock):
+                                continue
+                            chunks, status = _on_tool_result(
+                                block.tool_use_id, block.is_error, block.content,
+                                state, inline,
+                            )
+                            if status:
+                                await emit_status(status)
+                            for chunk in chunks:
+                                yield chunk
                         continue
 
                     if isinstance(message, ResultMessage):
-                        parts: List[str] = []
-                        if message.duration_ms:
-                            parts.append(_fmt_duration(message.duration_ms))
-                        if tool_count:
-                            plural = "s" if tool_count != 1 else ""
-                            parts.append(f"{tool_count} tool{plural}")
-                        # Live per-model context: totalTokens against the raw
-                        # model window, same data as the CLI's /context.
                         ctx = ""
                         try:
                             cu = await asyncio.wait_for(
                                 client.get_context_usage(), timeout=5
                             )
-                            used = int(cu.get("totalTokens") or 0)
-                            window = int(cu.get("rawMaxTokens") or 0)
-                            if used and window:
-                                pct = round(100 * used / window)
-                                ctx = (
-                                    f"context {_fmt_tokens(used)}/"
-                                    f"{_fmt_tokens(window)} ({pct}%)"
-                                )
+                            ctx = _context_from_usage(cu)
                         except Exception:
-                            log.debug(
-                                "get_context_usage failed", exc_info=True
-                            )
+                            log.debug("get_context_usage failed", exc_info=True)
                         if not ctx:
                             ctx = _context_status(
-                                last_usage, self.valves.CONTEXT_WINDOW_TOKENS
+                                state.last_usage, self.valves.CONTEXT_WINDOW_TOKENS
                             )
-                        if ctx:
-                            parts.append(ctx)
                         await emit_status(
-                            "Done · " + " · ".join(parts) if parts else "Done.",
+                            _done_line(message.duration_ms, state.tool_count, ctx),
                             done=True,
                         )
-                        usage_payload = (
-                            _owui_usage(last_usage) if last_usage else None
-                        )
-                        if __event_emitter__ is not None and usage_payload:
-                            # Live listeners (usage-display filters on the
-                            # socket) — this event is never persisted.
-                            try:
-                                await __event_emitter__(
-                                    {
-                                        "type": "chat:completion",
-                                        "data": {"usage": usage_payload},
-                                    }
-                                )
-                            except Exception:
-                                log.debug("usage emit failed", exc_info=True)
-                        if usage_payload:
-                            # The socket emitter's save_to_chat branch drops
-                            # chat:completion, and the message's ⓘ popover
-                            # renders from the *saved* message's `usage` — so
-                            # write it to the chat DB directly (in-process,
-                            # like the KB lookups). The upsert merges keys, so
-                            # the middleware's later {'done', 'output'} upsert
-                            # keeps it; isawaitable covers OWUI versions where
-                            # the upsert is sync.
-                            try:
-                                chat_id_meta = (__metadata__ or {}).get(
-                                    "chat_id"
-                                )
-                                msg_id_meta = (__metadata__ or {}).get(
-                                    "message_id"
-                                )
-                                if chat_id_meta and msg_id_meta:
-                                    from open_webui.models.chats import Chats
-
-                                    res = Chats.upsert_message_to_chat_by_id_and_message_id(
-                                        chat_id_meta,
-                                        msg_id_meta,
-                                        {"usage": usage_payload},
-                                        touch=False,
-                                    )
-                                    if inspect.isawaitable(res):
-                                        await res
-                            except Exception:
-                                log.debug(
-                                    "usage DB write failed", exc_info=True
-                                )
+                        if state.last_usage:
+                            await self._record_usage(
+                                _owui_usage(state.last_usage),
+                                __event_emitter__,
+                                __metadata__,
+                            )
                         for chunk in _inline_new_artifacts(
                             scan_dirs,
                             artifact_snapshot,
@@ -1199,10 +1058,10 @@
                             yield chunk
                         if message.subtype != "success":
                             yield f"\n\n_Agent stopped: {message.subtype}_\n"
-                        # Cost footer removed: subscription billing makes it
-                        # noise, and TTS reads it aloud in call mode.
-                        if turn_info is not None and turn_session_id:
-                            turn_info["session_id"] = turn_session_id
+                        # No cost footer: subscription billing makes it noise,
+                        # and TTS reads it aloud in call mode.
+                        if turn_info is not None and state.turn_session_id:
+                            turn_info["session_id"] = state.turn_session_id
                             turn_info["workdir"] = str(workdir)
                             turn_info["cwd"] = str(cwd)
                         return
@@ -1219,7 +1078,7 @@
                 "smaller file.\n"
             )
         except Exception as exc:
-            if resume_id and turn_session_id is None:
+            if resume_id and state.turn_session_id is None:
                 # Resume died before the session came up. Drop the stale id
                 # and rerun this turn cold — _render_transcript replays the
                 # history, and the new session id gets persisted on init.
@@ -1244,7 +1103,7 @@
             await emit_status(f"Error: {exc}", done=True)
             yield f"\n\n**Claude Code error:** `{type(exc).__name__}: {exc}`\n"
         finally:
-            active_tools.clear()
+            state.active_tools.clear()
             if heartbeat_task is not None and not heartbeat_task.done():
                 heartbeat_task.cancel()
                 try:
