@@ -7,9 +7,17 @@ tools, behind a normal chat UI, billed to your Claude subscription. It is for
 one person (or one trusted admin) who already runs Open WebUI and wants Claude
 Code in it, on the web and on mobile clients, rather than only in a terminal.
 
-![A finished turn: the Done line with duration, tool count and context usage, then the Write and Bash tool calls and the script's output](docs/images/tool-turn.jpg)
+<p align="center">
+  <img src="docs/images/tool-turn.jpg" width="800" alt="A finished turn in Open WebUI: the Done line with duration, tool count and context usage, then the Write and Bash tool calls and the script's output">
+  <br>
+  <sub>A turn: the agent writes a script, runs it, and the status line reports duration, tools and context.</sub>
+</p>
 
-![The ask_user form: the agent asks where to back up to, with three options and a free-text field, and gets the answer in the same turn](docs/images/ask-user.jpg)
+<p align="center">
+  <img src="docs/images/ask-user.jpg" width="800" alt="The ask_user form in Open WebUI: the agent asks where to back up to, with two options and a free-text field">
+  <br>
+  <sub><code>ask_user</code>: the agent pauses mid-turn, asks through Open WebUI's own form, and continues with the answers.</sub>
+</p>
 
 ## Credit
 
