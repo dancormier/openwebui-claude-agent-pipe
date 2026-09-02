@@ -6,6 +6,10 @@ comments and the homelab PRs that introduced them.
 
 ## Unreleased (2026-09-02)
 
+- Docs for a stranger: README rewritten around install, how it works, and
+  security; `docs/valves.md` generated from the `Valves` class by `build.py`
+  (and checked by `--check`); CONTRIBUTING, SECURITY, a PR template, and the
+  MIT LICENSE file the header always claimed.
 - The disabled fast path is gone: `_run_fast`, `_run_messages_api`,
   `_run_lite_agent`, the `_needs_agent` routing heuristic and its regexes, and
   the Messages-API tool definitions / dispatcher for the knowledge tools. None
