@@ -43,39 +43,71 @@ else installs.
 
 ## Install
 
-1. **Get a token.** On any machine with a browser and Claude Code installed,
-   run `claude setup-token` and copy the long-lived OAuth token it prints.
-   This is the sanctioned way to run the Agent SDK on a Pro/Max/Team
-   subscription. (An `ANTHROPIC_API_KEY` works too, pay-per-token.)
-2. **Add the function.** Admin Panel → Functions → **+** → paste the contents
-   of [`claude_agent_pipe.py`](claude_agent_pipe.py), id `claude_code`, any
-   name, Save. Open WebUI installs `claude-agent-sdk` from the `requirements:`
-   line on save (allow a minute; the save fails with "Error creating
-   function" if it cannot, and `OFFLINE_MODE=true` skips the install
-   entirely, so pip-install the SDK into Open WebUI's environment yourself
-   on such hosts). Or use the admin API:
-   ```sh
-   curl -sf -X POST http://localhost:8080/api/v1/functions/create \
-     -H "Authorization: Bearer $OWUI_ADMIN_KEY" -H 'Content-Type: application/json' \
-     --data-binary @<(python3 -c 'import json;print(json.dumps({"id":"claude_code","name":"Claude Code","meta":{"description":"Claude Code agent loop"},"content":open("claude_agent_pipe.py").read()}))')
-   ```
-3. **Set the valves.** Functions → Claude Code → ⚙ Valves:
-   `CLAUDE_CODE_OAUTH_TOKEN` = the token from step 1; `WORKDIR_ROOT` = a
-   directory the Open WebUI process can write (default
-   `/tmp/claude-agent-pipe`; use a persistent path so sessions survive
-   reboots). Read the [Security](#security) section before leaving
-   `PERMISSION_MODE` at its default.
-   Over the API, valves are a JSON object posted to
-   `POST /api/v1/functions/id/claude_code/valves/update`.
-4. **Enable it** with the toggle on the Functions page
-   (`POST /api/v1/functions/id/claude_code/toggle`), then pick
-   **Claude Code** in the model picker (extra picker entries via `MODELS`;
-   the API model id is `claude_code.claude-code`).
-5. **Send a message.** The status line shows `Session: new chat`, then tool
-   activity, then the Done line. A second message shows `Session: resumed`.
+Five steps: a token, the function, its valves, the toggle, a first message.
 
-Every valve is described in [docs/valves.md](docs/valves.md) (generated from
-the code, so it is always current).
+### 1. Get a token
+
+On any machine with a browser and Claude Code installed:
+
+```sh
+claude setup-token
+```
+
+Copy the long-lived OAuth token it prints. This is the sanctioned way to run
+the Agent SDK on a Pro/Max/Team subscription. An `ANTHROPIC_API_KEY` works
+too, billed per token.
+
+### 2. Add the function
+
+In the UI: Admin Panel → Functions → **+**, paste the contents of
+[`claude_agent_pipe.py`](claude_agent_pipe.py), set the id to `claude_code`
+and any name, Save.
+
+Or over the admin API:
+
+```sh
+curl -sf -X POST http://localhost:8080/api/v1/functions/create \
+  -H "Authorization: Bearer $OWUI_ADMIN_KEY" -H 'Content-Type: application/json' \
+  --data-binary @<(python3 -c 'import json;print(json.dumps({"id":"claude_code","name":"Claude Code","meta":{"description":"Claude Code agent loop"},"content":open("claude_agent_pipe.py").read()}))')
+```
+
+Either way, Open WebUI installs `claude-agent-sdk` from the file's
+`requirements:` line on save. Allow a minute. Two things can go wrong:
+
+- The save fails with "Error creating function": the install did not
+  succeed. Check the Open WebUI log for the pip error.
+- The host runs with `OFFLINE_MODE=true`: Open WebUI skips the install
+  entirely. Install the SDK into Open WebUI's Python environment yourself
+  (`pip install 'claude-agent-sdk>=0.2.116'`) and save again.
+
+### 3. Set the valves
+
+Functions → Claude Code → ⚙ Valves. Two matter on first install:
+
+- `CLAUDE_CODE_OAUTH_TOKEN`: the token from step 1.
+- `WORKDIR_ROOT`: a directory the Open WebUI process can write. The default
+  is `/tmp/claude-agent-pipe`; use a persistent path so sessions survive
+  reboots.
+
+Read the [Security](#security) section before leaving `PERMISSION_MODE` at
+its default. Every other valve is described in
+[docs/valves.md](docs/valves.md), generated from the code so it is always
+current.
+
+Over the API, valves are a JSON object posted to
+`POST /api/v1/functions/id/claude_code/valves/update`.
+
+### 4. Enable it
+
+Flip the toggle on the Functions page (or
+`POST /api/v1/functions/id/claude_code/toggle`), then pick **Claude Code** in
+the model picker. `MODELS` adds one picker entry per extra model id; the API
+model id is `claude_code.claude-code`.
+
+### 5. Send a message
+
+The status line shows `Session: new chat`, then tool activity, then the Done
+line. A second message shows `Session: resumed`.
 
 ## How it works
 
