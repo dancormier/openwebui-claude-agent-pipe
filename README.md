@@ -1,7 +1,34 @@
-# Claude Code pipe (installed copy)
+# openwebui-claude-agent-pipe
 
-The Open WebUI pipe function running as `claude_code`, kept here for durability.
-Base: [tfriedel/openwebui-claude-code](https://github.com/tfriedel/openwebui-claude-code) commit `5bbc1fc` + 11 local patches:
+An [Open WebUI](https://github.com/open-webui/open-webui) pipe function that
+runs each chat turn as a headless [Claude Agent SDK](https://code.claude.com/docs/en/agent-sdk/overview)
+session — Claude Code's agent loop, with a real working directory, behind a
+normal chat UI. Installs as the `claude_code` function.
+
+Fork of [tfriedel/openwebui-claude-code](https://github.com/tfriedel/openwebui-claude-code)
+(MIT) at commit `5bbc1fc`, which has been dormant since; this repo carries the
+patches below on top of it. Split out of the `homelab` repo's `hub/pipe/` on
+2026-09-02 with its history.
+
+## Files
+
+- `claude_agent_pipe.py` — the function. Single file by design: it deploys by
+  being posted to Open WebUI's admin API (or pasted into Admin → Functions).
+- `redact_stdin.py` — a CLI over the pipe's own secret redactor, for job
+  workers that deliver agent output outside the chat stream. It slices the
+  redactor out of `claude_agent_pipe.py` at the SDK import line, so the two
+  redaction boundaries share one implementation.
+- `test_*.py` — standalone suites, stdlib only, no pytest: `python3 test_sessions.py`
+  (optionally against a deployed copy: `python3 test_sessions.py <pipe.py>`).
+
+## Setup-specific defaults
+
+Two valves default to one particular machine's layout and are the first things
+another deployment changes: `GATEWAY_CONTRACT` (`~/homelab/hub/AGENTS.md`, the
+rules file injected into every turn) and the `REPO_MAP` example paths in its
+description. Everything else is generic Open WebUI / SDK configuration.
+
+## Patches on top of upstream
 
 1. **no-KB crash fix** — `_build_kb_mcp_server` returned a 2-tuple on the
    no-knowledge path; callers unpack 3 (`return None, [], {}`). Not filed upstream (Dan's call).
@@ -67,18 +94,21 @@ Base: [tfriedel/openwebui-claude-code](https://github.com/tfriedel/openwebui-cla
 
 Note: repo-rooted chats (#repo:) don't surface files created in the repo cwd as chat attachments — the artifact scanner deliberately walks only the scratch workdir and /tmp.
 
-Note: Hook verification: `scripts/verify-pipe-hooks.sh` (run on the Mini) proves the deny-secret-exfil PreToolUse hook fires for pipe-like headless runs and that no Home Assistant actuation connector tool is callable in them (the `permissions.deny` list in `claude/settings.json` matches exact tool names, so a renamed connector would otherwise un-deny them silently).
+Note: Hook verification: homelab's `scripts/verify-pipe-hooks.sh` proves the deny-secret-exfil PreToolUse hook fires for pipe-like headless runs and that no Home Assistant actuation connector tool is callable in them (the `permissions.deny` list in `claude/settings.json` matches exact tool names, so a renamed connector would otherwise un-deny them silently).
 
-To redeploy after editing: `source ~/.secrets && scripts/deploy-pipe.sh` on the
-Mini — it takes the admin key from `OPENWEBUI_ADMIN_API_KEY`, or from an
-explicit `$KEY` piped in from the laptop (usage in its header). It backs up the
-deployed copy, posts the repo copy, verifies parity, and runs the suites
-against the deployed copy. Or paste into Admin → Functions. Valve state lives in webui.db, not
-here — `scripts/set-repo-map.sh` updates the REPO_MAP valve.
+## Deploying
+
+Merging here deploys nothing: Open WebUI runs the copy stored in `webui.db`.
+The deploy tooling lives in the `homelab` repo, which reads this checkout via
+`PIPE_DIR` (default `~/Developer/openwebui-claude-agent-pipe`):
+`source ~/.secrets && ~/homelab/scripts/deploy-pipe.sh` backs up the deployed
+copy, posts this checkout's copy, verifies parity, and runs the suites against
+the deployed copy. Or paste into Admin → Functions. Valve state lives in
+`webui.db`, not here — homelab's `scripts/set-repo-map.sh` updates `REPO_MAP`.
 
 Known-value redaction (2026-08-21): the patterns are prefix-anchored and cannot
 recognise a uuid token, an ntfy topic or a password, so the two job workers and
-`slack-reply.sh` call `redact_stdin.py --known-from-tpl shell/secrets.tpl`
+`slack-reply.sh` call `redact_stdin.py --known-from-tpl <secrets.tpl>`
 inside a subshell that sourced `~/.secrets`, and every live value (plus its
 base64/hex/URL-encoded forms) is scrubbed by value. That path slices the *repo*
 copy of the pipe, so a pattern added here protects the workers on merge but the
