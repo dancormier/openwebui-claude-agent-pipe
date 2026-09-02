@@ -115,7 +115,7 @@ def _build_kb_mcp_server(
             from open_webui.main import app
             from open_webui.models.users import Users
             from open_webui.retrieval.utils import query_collection
-        except Exception as exc:
+        except (Exception, SystemExit) as exc:
             return {
                 "content": [
                     {"type": "text", "text": f"Knowledge search unavailable: {exc}"}

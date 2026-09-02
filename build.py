@@ -29,6 +29,13 @@ def assemble() -> str:
 
 def _valves(source: str):
     tree = ast.parse(source)
+    constants = {
+        t.id: ast.literal_eval(n.value)
+        for n in tree.body
+        if isinstance(n, ast.Assign) and isinstance(n.value, ast.Constant)
+        for t in n.targets
+        if isinstance(t, ast.Name)
+    }
     for node in ast.walk(tree):
         if isinstance(node, ast.ClassDef) and node.name == "Valves":
             break
@@ -40,7 +47,10 @@ def _valves(source: str):
         call = item.value
         if not isinstance(call, ast.Call):
             continue
-        kwargs = {k.arg: ast.literal_eval(k.value) for k in call.keywords}
+        kwargs = {
+            k.arg: constants[k.value.id] if isinstance(k.value, ast.Name) else ast.literal_eval(k.value)
+            for k in call.keywords
+        }
         yield item.target.id, ast.unparse(item.annotation), kwargs.get("default"), kwargs.get("description", "")
 
 
