@@ -22,6 +22,9 @@ comments and the homelab PRs that introduced them.
   `{type:"other",text}` objects; a question with no options is a free-text
   field; the prompt makes the tool the channel for any question the reply
   would otherwise end on.
+  A client that holds a socket session but has no form (Conduit answers
+  the event with an error at once) takes the markdown path too: only a
+  timeout or a cancel counts as the user declining to answer.
 - Subagent visibility: a `Task`/`Agent` call registers a subagent; its tool calls
   show as `↳ <agent> · 🔧 …` in the status line and heartbeat; its result
   closes it with `✅ <agent> · N tools · Ns`; the Done line counts

@@ -673,15 +673,21 @@ def _answer_text(value: Any) -> str:
 def _map_user_input_response(
     output: Any, questions: List[Dict[str, Any]]
 ) -> Dict[str, Any]:
-    """Turn the form's reply into the tool result. Every failure shape —
-    error, cancel, timeout, malformed — collapses to `unanswered` so the
-    agent has exactly one fallback to follow."""
+    """Turn the form's reply into the tool result. A cancel or a timeout
+    means the user saw the form and did not answer → `unanswered`. Any
+    other error means the form never reached them — a client that holds a
+    socket session but has no form (Conduit answers the event with
+    "Invalid user input request.", verified 2026-09-02), or a dropped
+    session — so the questions fall through to the no-form path."""
     if not isinstance(output, dict):
         return {"status": "unanswered", "reason": "no response",
                 "instruction": _ASK_USER_UNANSWERED_INSTRUCTION}
     if output.get("error"):
-        return {"status": "unanswered", "reason": str(output["error"]),
-                "instruction": _ASK_USER_UNANSWERED_INSTRUCTION}
+        reason = str(output["error"])
+        if "timed out" in reason.lower():
+            return {"status": "unanswered", "reason": reason,
+                    "instruction": _ASK_USER_UNANSWERED_INSTRUCTION}
+        return {**_no_ui_result(questions), "reason": reason}
     if output.get("status") == "cancelled":
         return {"status": "unanswered", "reason": "cancelled",
                 "instruction": _ASK_USER_UNANSWERED_INSTRUCTION}
