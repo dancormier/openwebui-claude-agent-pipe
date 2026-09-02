@@ -4,7 +4,9 @@ Patches on top of [tfriedel/openwebui-claude-code](https://github.com/tfriedel/o
 commit `5bbc1fc`, in the order they landed. Numbering matches the pipe's own
 comments and the homelab PRs that introduced them.
 
-## Unreleased (2026-09-02)
+## Unreleased
+
+## v0.1.0 (2026-09-02)
 
 - Fresh-install smoke test passed against a throwaway
   `ghcr.io/open-webui/open-webui:main` container (Linux, root, bind-mounted
