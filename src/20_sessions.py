@@ -23,6 +23,15 @@ def _message_text(message: Dict[str, Any]) -> str:
 # OpenAI-API clients, which send no chat_id). Files hold session ids and
 # paths only — never credentials.
 
+_DEFAULT_WORKDIR_ROOT = "/tmp/claude-agent-pipe"
+
+
+def _workdir_root(raw: str) -> str:
+    """The WORKDIR_ROOT valve, or its default when blank. A cleared field must
+    not become Path("") — that is the Open WebUI process's own cwd."""
+    return (raw or "").strip() or _DEFAULT_WORKDIR_ROOT
+
+
 _FP_STORE_FILE = "_sessions.json"
 _FP_STORE_TTL_SECONDS = 30 * 24 * 3600  # prune keyless entries after 30 days
 

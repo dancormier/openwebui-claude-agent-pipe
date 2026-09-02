@@ -6,6 +6,14 @@ comments and the homelab PRs that introduced them.
 
 ## Unreleased
 
+- Container hardening from the pre-release review: a `CLAUDE_CONFIG_DIR`
+  valve so the Claude Code CLI's own session state can live on a persistent
+  path (empty inherits `$HOME/.claude`, as before); an unwritable
+  `WORKDIR_ROOT` now yields a message naming the valve instead of a
+  traceback; a blank `WORKDIR_ROOT` falls back to the default instead of
+  writing chat workdirs into Open WebUI's cwd; the knowledge search import
+  guard catches `SystemExit` like the chats one does.
+
 ## v0.1.0 (2026-09-02)
 
 - Fresh-install smoke test passed against a throwaway

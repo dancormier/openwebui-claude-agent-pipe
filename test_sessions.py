@@ -67,6 +67,8 @@ check(
 )
 
 # ── prefix slicing ─────────────────────────────────────────────────────────
+check("blank WORKDIR_ROOT falls back to the default", mod._workdir_root("  "), mod._DEFAULT_WORKDIR_ROOT)
+check("set WORKDIR_ROOT is kept, trimmed", mod._workdir_root(" /srv/pipe "), "/srv/pipe")
 check("drops latest user", strip_latest([U1, A1, U2]), [U1, A1])
 check("single message → empty", strip_latest([U1]), [])
 check("no user at all", strip_latest([A1]), [A1])

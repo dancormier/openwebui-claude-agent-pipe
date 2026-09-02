@@ -44,8 +44,25 @@
             description="Comma-separated tools auto-approved without prompting.",
         )
         WORKDIR_ROOT: str = Field(
-            default="/tmp/claude-agent-pipe",
-            description="Root directory for per-chat workspaces. One subdir per chat_id.",
+            default=_DEFAULT_WORKDIR_ROOT,
+            description=(
+                "Root directory for per-chat workspaces (one subdir per chat) "
+                "and the pipe's session metadata. Must be writable by the "
+                "Open WebUI process; make it persistent so sessions survive "
+                "restarts. Blank falls back to the default."
+            ),
+        )
+        CLAUDE_CONFIG_DIR: str = Field(
+            default="",
+            description=(
+                "Directory the Claude Code CLI keeps its own state in "
+                "(session transcripts, settings) — the CLAUDE_CONFIG_DIR it "
+                "is started with. Empty inherits the process default, "
+                "$HOME/.claude. In a container, set a persistent path (e.g. "
+                "<WORKDIR_ROOT>/claude-config) or every session dies with "
+                "the container; note SETTING_SOURCES=user then reads "
+                "CLAUDE.md and settings.json from here, not from ~/.claude."
+            ),
         )
         GATEWAY_CONTRACT_PATH: str = Field(
             default="",
@@ -194,6 +211,7 @@
         this wrapper must keep the original parameter list verbatim.
         """
         redactor = _StreamRedactor()
+        workdir_root = _workdir_root(self.valves.WORKDIR_ROOT)
         event_hits: List[str] = []
         emitter = _redacting_emitter(__event_emitter__, event_hits)
 
@@ -225,7 +243,7 @@
         # warm. If redaction fired, the client-stored text differs from what
         # the agent produced — the next lookup misses and replays once; safe.
         if not __chat_id__ and turn_info.get("session_id"):
-            store = _load_fp_store(self.valves.WORKDIR_ROOT)
+            store = _load_fp_store(workdir_root)
             fp = _history_fingerprint(
                 (body.get("messages") or [])
                 + [{"role": "assistant", "content": "".join(emitted_parts)}]
@@ -240,7 +258,7 @@
                     "cwd": turn_info.get("cwd") or turn_info["workdir"],
                     "ts": time.time(),
                 }
-                _save_fp_store(self.valves.WORKDIR_ROOT, store)
+                _save_fp_store(workdir_root, store)
 
         hits = redactor.hits + event_hits
         if hits:
@@ -325,6 +343,7 @@
         # here makes the per-client value the only path there is.
         os.environ.pop("HUB_CHAT_ID", None)
 
+        workdir_root = _workdir_root(self.valves.WORKDIR_ROOT)
         prompt = _extract_latest_user_prompt(body)
         if not prompt:
             yield "_No user message to send to Claude Code._"
@@ -355,9 +374,9 @@
         # "default" workdir where all keyless chats collided.
         fp_entry: Optional[Dict[str, Any]] = None
         if chat_id:
-            workdir = Path(self.valves.WORKDIR_ROOT) / chat_id
+            workdir = Path(workdir_root) / chat_id
         else:
-            fp_entry = _load_fp_store(self.valves.WORKDIR_ROOT).get(
+            fp_entry = _load_fp_store(workdir_root).get(
                 _history_fingerprint(
                     _strip_latest_user(body.get("messages") or [])
                 )
@@ -370,10 +389,18 @@
                 workdir = Path(fp_entry["workdir"])
             else:
                 workdir = (
-                    Path(self.valves.WORKDIR_ROOT)
+                    Path(workdir_root)
                     / f"anon-{uuid.uuid4().hex[:12]}"
                 )
-        workdir.mkdir(parents=True, exist_ok=True)
+        try:
+            workdir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            yield (
+                f"_Cannot create the chat workspace `{workdir}` ({exc}). "
+                "Point the `WORKDIR_ROOT` valve at a directory the Open WebUI "
+                "process can write._"
+            )
+            return
 
         # cwd: persisted repo choice wins; else an explicit #repo: prefix on
         # a fresh session; else the scratch workdir. Metadata lives under
@@ -381,7 +408,7 @@
         repo_map = _parse_repo_map(self.valves.REPO_MAP)
         cwd = Path(
             (
-                _load_session_meta(self.valves.WORKDIR_ROOT, chat_id).get("cwd")
+                _load_session_meta(workdir_root, chat_id).get("cwd")
                 if chat_id
                 else (fp_entry or {}).get("cwd")
             )
@@ -401,7 +428,7 @@
             if chat_id:
                 has_session = bool(
                     _chat_sessions.get(chat_id)
-                    or _load_session_meta(self.valves.WORKDIR_ROOT, chat_id).get(
+                    or _load_session_meta(workdir_root, chat_id).get(
                         "session_id"
                     )
                 )
@@ -428,7 +455,7 @@
         if not _no_resume:
             if chat_id:
                 resume_id = _chat_sessions.get(chat_id) or _load_session_meta(
-                    self.valves.WORKDIR_ROOT, chat_id
+                    workdir_root, chat_id
                 ).get("session_id")
             elif fp_entry:
                 resume_id = fp_entry.get("session_id")
@@ -525,7 +552,7 @@
             )
             contract = _gateway_contract(
                 str(cwd),
-                self.valves.WORKDIR_ROOT if loads_from_cwd else "",
+                workdir_root if loads_from_cwd else "",
                 self.valves.GATEWAY_CONTRACT_PATH,
             )
             if contract:
@@ -554,6 +581,10 @@
             }
 
         agent_env = _agent_env(chat_id)
+        if self.valves.CLAUDE_CONFIG_DIR.strip():
+            agent_env["CLAUDE_CONFIG_DIR"] = str(
+                Path(self.valves.CLAUDE_CONFIG_DIR.strip()).expanduser()
+            )
         if agent_env:
             options_kwargs["env"] = {**options_kwargs.get("env", {}), **agent_env}
 
@@ -608,7 +639,7 @@
                                 if chat_id:
                                     _chat_sessions[chat_id] = session_id
                                     _save_session_meta(
-                                        self.valves.WORKDIR_ROOT,
+                                        workdir_root,
                                         chat_id,
                                         {"session_id": session_id, "cwd": str(cwd)},
                                     )
@@ -737,7 +768,7 @@
                 if chat_id:
                     _chat_sessions.pop(chat_id, None)
                     _save_session_meta(
-                        self.valves.WORKDIR_ROOT, chat_id, {"cwd": str(cwd)}
+                        workdir_root, chat_id, {"cwd": str(cwd)}
                     )
                 await emit_status("Session expired — replaying history…")
                 async for chunk in self._pipe_stream(
