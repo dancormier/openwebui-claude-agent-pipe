@@ -421,7 +421,7 @@ def _gateway_contract(cwd: str, workdir_root: str, contract_path: str) -> str:
 
     A `#repo:` session runs with cwd set to the mapped repo, so the SDK loads
     THAT repo's CLAUDE.md and never reads `hub/AGENTS.md`. On 2026-07-27 that
-    meant `#repo:homelab` sessions ran with no response contract, no async
+    meant `#repo:<name>` sessions ran with no response contract, no async
     rules, and no Hard Rules — under bypassPermissions — because the repo had
     no root instruction file at all. Adding one per repo fixes the repos we
     remember; this fixes the class, including the next REPO_MAP entry someone
@@ -1657,9 +1657,10 @@ class Pipe:
             description="Root directory for per-chat workspaces. One subdir per chat_id.",
         )
         GATEWAY_CONTRACT_PATH: str = Field(
-            default="~/homelab/hub/AGENTS.md",
+            default="",
             description=(
-                "Contract appended to the system prompt when a chat is rooted "
+                "Path to a rules file (e.g. ~/gateway/AGENTS.md) appended to "
+                "the system prompt when a chat is rooted "
                 "outside WORKDIR_ROOT (a #repo: session), where the agent would "
                 "otherwise load only that repo's CLAUDE.md and never see the "
                 "gateway's Hard Rules. Empty disables the append."
@@ -1723,7 +1724,7 @@ class Pipe:
                 "chat runs from a clean baseline and does NOT inherit the "
                 "backend user's ~/.claude/ or the workdir's .claude/ config. "
                 'Add "user" to load ~/.claude/CLAUDE.md and ~/.claude/'
-                "settings.json (persistent context for single-user/homelab "
+                "settings.json (persistent context for single-user "
                 "setups). WARNING: settings.json can define hooks that execute "
                 "code and permission grants — only enable on instances you "
                 "trust and control. Avoid on multi-user/public deployments."
@@ -1733,8 +1734,7 @@ class Pipe:
             default="",
             description=(
                 "Comma-separated name=path allowlist of repos a chat may run "
-                "in, e.g. homelab=/Users/dc-homeserver/homelab,"
-                "vault=/Users/dc-homeserver/Obsidian/personal. Start a chat's "
+                "in, e.g. app=/srv/app,notes=/home/me/notes. Start a chat's "
                 "FIRST message with #repo:<name> to set its cwd to that path "
                 "for the whole chat (loads the repo's CLAUDE.md via the "
                 "project setting source). Unknown names error in-chat. Empty "
