@@ -9,7 +9,6 @@
 
 _ASK_USER_TOOL = "mcp__ask-user__ask_user"
 _ASK_USER_MAX_QUESTIONS = 4
-_ASK_USER_MIN_OPTIONS = 2
 _ASK_USER_MAX_OPTIONS = 3
 _ASK_USER_TIMEOUT_MS = 180_000
 _ASK_USER_UNANSWERED_INSTRUCTION = (
@@ -38,13 +37,10 @@ def _normalize_questions(raw: Any) -> List[Dict[str, Any]]:
         text = str(q.get("question") or "").strip()[:500]
         if not text:
             raise ValueError(f"question {index} needs question text")
-        options = q.get("options")
-        if not isinstance(options, list) or not (
-            _ASK_USER_MIN_OPTIONS <= len(options) <= _ASK_USER_MAX_OPTIONS
-        ):
+        options = q.get("options") or []
+        if not isinstance(options, list) or len(options) > _ASK_USER_MAX_OPTIONS:
             raise ValueError(
-                f"question {index} needs {_ASK_USER_MIN_OPTIONS}-"
-                f"{_ASK_USER_MAX_OPTIONS} options"
+                f"question {index} takes at most {_ASK_USER_MAX_OPTIONS} options"
             )
         norm_options = []
         for opt in options:
@@ -72,7 +68,9 @@ def _normalize_questions(raw: Any) -> List[Dict[str, Any]]:
                 or f"Question {index}",
                 "question": text,
                 "options": norm_options,
-                "allow_other": bool(q.get("allow_other", True)),
+                # Fewer than two options is not a choice; the free-text field
+                # is then the answer, so it cannot be switched off.
+                "allow_other": len(norm_options) < 2 or bool(q.get("allow_other", True)),
             }
         )
     return out
@@ -88,9 +86,14 @@ def _render_questions_markdown(questions: List[Dict[str, Any]]) -> str:
             desc = f" — {opt['description']}" if opt["description"] else ""
             lines.append(f"   - ({letter}) {opt['label']}{desc}")
         if q["allow_other"]:
-            lines.append("   - or type your own answer")
+            lines.append(
+                "   - or type your own answer" if q["options"] else "   - type your answer"
+            )
         lines.append("")
-    picks = ", ".join(f"{n}a" for n in range(1, len(questions) + 1))
+    picks = ", ".join(
+        f"{n}a" if q["options"] else f"{n}: …"
+        for n, q in enumerate(questions, 1)
+    )
     lines.append(f"Reply with your picks, e.g. `{picks}`.")
     return "\n".join(lines)
 
@@ -108,6 +111,17 @@ def _user_input_payload(
             "timeout_ms": timeout_ms,
         },
     }
+
+
+def _answer_text(value: Any) -> str:
+    """The form answers with {"type":"option","label",...} for a pick and
+    {"type":"other","text"} for free text; older or other clients may send
+    a bare string."""
+    if isinstance(value, dict):
+        value = value.get("text") if value.get("type") == "other" else value.get("label")
+    if value is None:
+        return ""
+    return str(value).strip()
 
 
 def _map_user_input_response(
@@ -131,10 +145,9 @@ def _map_user_input_response(
                 "instruction": _ASK_USER_UNANSWERED_INSTRUCTION}
     answers: Dict[str, str] = {}
     for q in questions:
-        value = raw.get(q["id"])
-        if value is None or str(value).strip() == "":
-            continue
-        answers[q["id"]] = str(value).strip()
+        value = _answer_text(raw.get(q["id"]))
+        if value:
+            answers[q["id"]] = value
     if not answers:
         return {"status": "unanswered", "reason": "empty answers",
                 "instruction": _ASK_USER_UNANSWERED_INSTRUCTION}

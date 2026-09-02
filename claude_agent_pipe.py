@@ -555,7 +555,6 @@ def _extract_effort_prefix(prompt: str) -> Tuple[Optional[str], str]:
 
 _ASK_USER_TOOL = "mcp__ask-user__ask_user"
 _ASK_USER_MAX_QUESTIONS = 4
-_ASK_USER_MIN_OPTIONS = 2
 _ASK_USER_MAX_OPTIONS = 3
 _ASK_USER_TIMEOUT_MS = 180_000
 _ASK_USER_UNANSWERED_INSTRUCTION = (
@@ -584,13 +583,10 @@ def _normalize_questions(raw: Any) -> List[Dict[str, Any]]:
         text = str(q.get("question") or "").strip()[:500]
         if not text:
             raise ValueError(f"question {index} needs question text")
-        options = q.get("options")
-        if not isinstance(options, list) or not (
-            _ASK_USER_MIN_OPTIONS <= len(options) <= _ASK_USER_MAX_OPTIONS
-        ):
+        options = q.get("options") or []
+        if not isinstance(options, list) or len(options) > _ASK_USER_MAX_OPTIONS:
             raise ValueError(
-                f"question {index} needs {_ASK_USER_MIN_OPTIONS}-"
-                f"{_ASK_USER_MAX_OPTIONS} options"
+                f"question {index} takes at most {_ASK_USER_MAX_OPTIONS} options"
             )
         norm_options = []
         for opt in options:
@@ -618,7 +614,9 @@ def _normalize_questions(raw: Any) -> List[Dict[str, Any]]:
                 or f"Question {index}",
                 "question": text,
                 "options": norm_options,
-                "allow_other": bool(q.get("allow_other", True)),
+                # Fewer than two options is not a choice; the free-text field
+                # is then the answer, so it cannot be switched off.
+                "allow_other": len(norm_options) < 2 or bool(q.get("allow_other", True)),
             }
         )
     return out
@@ -634,9 +632,14 @@ def _render_questions_markdown(questions: List[Dict[str, Any]]) -> str:
             desc = f" — {opt['description']}" if opt["description"] else ""
             lines.append(f"   - ({letter}) {opt['label']}{desc}")
         if q["allow_other"]:
-            lines.append("   - or type your own answer")
+            lines.append(
+                "   - or type your own answer" if q["options"] else "   - type your answer"
+            )
         lines.append("")
-    picks = ", ".join(f"{n}a" for n in range(1, len(questions) + 1))
+    picks = ", ".join(
+        f"{n}a" if q["options"] else f"{n}: …"
+        for n, q in enumerate(questions, 1)
+    )
     lines.append(f"Reply with your picks, e.g. `{picks}`.")
     return "\n".join(lines)
 
@@ -654,6 +657,17 @@ def _user_input_payload(
             "timeout_ms": timeout_ms,
         },
     }
+
+
+def _answer_text(value: Any) -> str:
+    """The form answers with {"type":"option","label",...} for a pick and
+    {"type":"other","text"} for free text; older or other clients may send
+    a bare string."""
+    if isinstance(value, dict):
+        value = value.get("text") if value.get("type") == "other" else value.get("label")
+    if value is None:
+        return ""
+    return str(value).strip()
 
 
 def _map_user_input_response(
@@ -677,10 +691,9 @@ def _map_user_input_response(
                 "instruction": _ASK_USER_UNANSWERED_INSTRUCTION}
     answers: Dict[str, str] = {}
     for q in questions:
-        value = raw.get(q["id"])
-        if value is None or str(value).strip() == "":
-            continue
-        answers[q["id"]] = str(value).strip()
+        value = _answer_text(raw.get(q["id"]))
+        if value:
+            answers[q["id"]] = value
     if not answers:
         return {"status": "unanswered", "reason": "empty answers",
                 "instruction": _ASK_USER_UNANSWERED_INSTRUCTION}
@@ -1806,11 +1819,14 @@ def _build_ask_user_mcp_server(
     @tool(
         "ask_user",
         (
-            "Ask the user up to 4 multiple-choice questions and wait for the "
-            "answers. Use only when a real ambiguity would change the work "
-            "materially; otherwise decide and say what you assumed. Each "
-            "option needs a short label; put your recommendation and its "
-            "reason in that option's description."
+            "Ask the user 1-4 questions and get the answers back in this "
+            "same turn. Call this whenever you would otherwise end your "
+            "reply by asking the user something: a missing detail, a choice "
+            "between approaches, a preference. Bundle every open question "
+            "into one call. Give 2-3 options for a choice (short label, your "
+            "recommendation and its reason in that option's description); "
+            "give no options for an open-ended detail like a name or a "
+            "time, and the user gets a text field."
         ),
         {
             "type": "object",
@@ -1830,7 +1846,10 @@ def _build_ask_user_mcp_server(
                             "question": {"type": "string"},
                             "options": {
                                 "type": "array",
-                                "minItems": _ASK_USER_MIN_OPTIONS,
+                                "description": (
+                                    "2-3 choices; omit for an open-ended "
+                                    "detail (the user gets a text field)"
+                                ),
                                 "maxItems": _ASK_USER_MAX_OPTIONS,
                                 "items": {
                                     "type": "object",
@@ -1846,7 +1865,7 @@ def _build_ask_user_mcp_server(
                                 "description": "Offer a free-text answer (default true)",
                             },
                         },
-                        "required": ["question", "options"],
+                        "required": ["question"],
                     },
                 }
             },
@@ -1885,17 +1904,23 @@ def _build_ask_user_mcp_server(
 
 
 _ASK_USER_PROMPT = (
-    "You have an `ask_user` tool that shows the user a short multiple-choice "
-    "form and waits for the answers. Use it only when a genuine ambiguity "
-    "would waste a long turn or lead to materially different work; for "
-    "routine judgment calls, decide and say what you assumed. One call per "
-    "turn, at most 4 questions, 2-3 options each, your recommendation and "
-    "its reason in that option's description. It is not an approval "
-    "channel: a confirmation the rules require still ends the turn as a "
-    "plain question and waits for an explicit yes. If the result's status "
-    "is `no_ui`, put its `ask_in_reply` text in your reply verbatim and end "
-    "the turn; the next user message carries the answers. If the status is "
-    "`unanswered`, proceed on your best assumption and say which you took."
+    "Asking the user something: whenever your reply would end with a "
+    "question for the user - a missing detail, a choice between approaches, "
+    "a preference - call the `ask_user` tool instead of writing the question "
+    "as text. It shows a multiple-choice form and returns the answers in the "
+    "same turn, so you can finish the work without another round trip. "
+    "Bundle every open question into one call: at most 4 questions; 2-3 "
+    "options for a choice, with your recommendation and its reason in that "
+    "option's description, or no options for an open-ended detail like a "
+    "name or a time, which gives the user a text field. When the stakes are "
+    "low, prefer a sensible assumption you state over any question at all; "
+    "but when you do ask, ask through the tool. One exception: a "
+    "confirmation the rules require before a risky action stays a plain "
+    "text question that ends the turn and waits for an explicit yes. If the "
+    "tool result's status is `no_ui`, put its `ask_in_reply` text in your "
+    "reply verbatim and end the turn; the next user message carries the "
+    "answers. If the status is `unanswered`, proceed on your best assumption "
+    "and say which you took."
 )
 
 _MODE_PREFIXES = ("/agent", "/fast")
