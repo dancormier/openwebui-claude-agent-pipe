@@ -1877,7 +1877,11 @@ def _build_ask_user_mcp_server(
         }
 
     server = create_sdk_mcp_server("ask-user", "0.1", tools=[_ask])
-    return server, [_ASK_USER_TOOL]
+    # Claude Code 2.1 defers MCP tools behind ToolSearch, so without this
+    # the model sees only the tool's name and never reads its description;
+    # alwaysLoad is documented for stdio/http servers only but the CLI
+    # honours it on sdk servers too (verified 2026-09-02, CLI 2.1.258).
+    return {**server, "alwaysLoad": True}, [_ASK_USER_TOOL]
 
 
 _ASK_USER_PROMPT = (
