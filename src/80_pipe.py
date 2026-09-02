@@ -67,6 +67,23 @@
                 "answer in the next message instead."
             ),
         )
+        SESSION_SEARCH: bool = Field(
+            default=True,
+            description=(
+                "Register search_chats / read_chat: the agent can look up the "
+                "calling user's earlier chats in this Open WebUI (read-only "
+                "sqlite over the chat table, scoped to that user). Only "
+                "sqlite deployments; leave on elsewhere, the tools then report "
+                "themselves unavailable."
+            ),
+        )
+        CHAT_DB_PATH: str = Field(
+            default="",
+            description=(
+                "Path to Open WebUI's webui.db for SESSION_SEARCH. Empty "
+                "resolves DATA_DIR/webui.db from the running Open WebUI."
+            ),
+        )
         MAX_TURNS: int = Field(
             default=30,
             description="Maximum agent turns per user message. 0 disables the cap.",
@@ -852,6 +869,15 @@
             ask_server, ask_tool_names = _build_ask_user_mcp_server(event_call)
             mcp_servers["ask-user"] = ask_server
             allowed_tools = allowed_tools + ask_tool_names
+        chats_server = None
+        if self.valves.SESSION_SEARCH:
+            chats_server, chats_tool_names = _build_chats_mcp_server(
+                (__user__ or {}).get("id"), chat_id,
+                _owui_db_path(self.valves.CHAT_DB_PATH.strip()),
+            )
+            if chats_server is not None:
+                mcp_servers["hub-chats"] = chats_server
+                allowed_tools = allowed_tools + chats_tool_names
 
         options_kwargs: Dict[str, Any] = {
             "cwd": str(cwd),
@@ -917,6 +943,8 @@
             append_parts.append(system_prompt)
         if self.valves.ASK_USER:
             append_parts.append(_ASK_USER_PROMPT)
+        if chats_server is not None:
+            append_parts.append(_CHATS_PROMPT)
         if not chat_id:
             # Keyless callers are mobile/voice surfaces (Conduit): small
             # screens, often TTS. Nudge hard toward brevity.

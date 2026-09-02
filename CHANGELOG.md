@@ -6,6 +6,13 @@ comments and the homelab PRs that introduced them.
 
 ## Unreleased (2026-09-02)
 
+- `search_chats` / `read_chat` tools (`SESSION_SEARCH` valve, default on;
+  `CHAT_DB_PATH` overrides the sqlite path): the agent can find and read the
+  calling user's earlier chats in this Open WebUI when they refer to a past
+  conversation. Read-only sqlite over the `chat` table, always filtered by
+  the caller's user id, word-start keyword ranking (title hits first),
+  registered with `alwaysLoad`. Pure helpers in `src/38_chats.py`, covered
+  by `test_chats.py`.
 - `ask_user` tool (`ASK_USER` valve, default on): the agent can pause
   mid-turn and ask up to 4 multiple-choice questions. With a browser socket
   session the pipe sends Open WebUI's own `request:user_input` event and
