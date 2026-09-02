@@ -1,4 +1,4 @@
-# openwebui-claude-agent-pipe
+# Open WebUI Claude Agent Pipe
 
 An [Open WebUI](https://github.com/open-webui/open-webui) pipe function that
 runs each chat turn as a headless [Claude Agent SDK](https://code.claude.com/docs/en/agent-sdk/overview)
@@ -24,8 +24,9 @@ repo is where the idea came from.
 - **Real agent loop** — Read/Write/Edit/Bash/Glob/Grep/WebSearch/WebFetch and
   subagents, in a per-chat working directory, streamed token by token.
 - **Durable sessions** — each chat maps to one Claude Code session that
-  survives Open WebUI restarts and function redeploys; a cold start replays
-  the chat history once and resumes warm from then on.
+  survives Open WebUI restarts and function redeploys (in a container, set
+  `CLAUDE_CONFIG_DIR` to a persistent path too); a cold start replays the
+  chat history once and resumes warm from then on.
 - **Keyless clients** — OpenAI-API callers that send no chat id (mobile apps,
   voice) get a session too, fingerprinted from the conversation prefix.
 - **Live status** — tool activity, a heartbeat while a tool runs, subagents
@@ -39,19 +40,30 @@ repo is where the idea came from.
 - **Knowledge bases** — a Workspace Model's attached knowledge becomes
   `search_knowledge` / `list` / `read` / `grep` tools the agent calls itself.
 - **Images and artifacts** — attached images are written to the workdir for
-  the agent to read; files the agent creates come back inline or as links.
+  the agent to read; files the agent creates in the workdir (and in `/tmp`,
+  if `SCAN_TMP_ARTIFACTS` is on) come back inline or as links.
 - **Repo-rooted chats** — `#repo:<name>` on a first message runs the chat
-  inside an allowlisted repository, loading its `CLAUDE.md`.
+  inside an allowlisted repository (and loads its `CLAUDE.md` when
+  `SETTING_SOURCES` includes `project`).
 - **Output redaction** — API keys, tokens and private keys are scrubbed from
   the reply stream and status events before they reach the chat database.
 - **Effort, budget, fallback** — per-turn `/effort <level>`, a task token
   budget the model paces itself against, and a fallback model.
 
+## Requirements
+
+- Open WebUI with the Functions framework; tested on 0.11.3.
+- The Python Open WebUI runs on (3.11 or newer). `claude-agent-sdk` 0.2.116
+  or newer is installed by Open WebUI from the file's `requirements:` line
+  and bundles the Claude Code CLI, so no Node.js and no separate `claude`
+  install on the host.
+- A Claude Pro/Max/Team subscription (one-time `claude setup-token` on any
+  machine with a browser) or an Anthropic API key.
+- A directory the Open WebUI process can write, for `WORKDIR_ROOT`.
+
 Tested on macOS 15 (native install) and on Linux as root in the official
 `ghcr.io/open-webui/open-webui:main` image, with Open WebUI 0.11.3,
-`claude-agent-sdk` 0.2.116, Claude Code CLI 2.1.258. The `requirements:` line
-sets 0.2.116 as the floor; the SDK bundles the Claude Code CLI, so nothing
-else installs.
+`claude-agent-sdk` 0.2.116, Claude Code CLI 2.1.258.
 
 ## Install
 
@@ -75,7 +87,7 @@ In the UI: Admin Panel → Functions → **+**, paste the contents of
 [`claude_agent_pipe.py`](claude_agent_pipe.py), set the id to `claude_code`
 and any name, Save.
 
-Or over the admin API:
+Or over the admin API (bash, from the repository root):
 
 ```sh
 curl -sf -X POST http://localhost:8080/api/v1/functions/create \
@@ -101,6 +113,11 @@ Functions → Claude Code → ⚙ Valves. Two matter on first install:
   is `/tmp/claude-agent-pipe`; use a persistent path so sessions survive
   reboots.
 
+In a container, also set `CLAUDE_CONFIG_DIR` to a persistent path (for
+example a subdirectory of a bind-mounted `WORKDIR_ROOT`). The Claude Code
+CLI keeps its session transcripts there; left at the default they live in
+the container's `$HOME/.claude` and vanish when the image is recreated.
+
 Read the [Security](#security) section before leaving `PERMISSION_MODE` at
 its default. Every other valve is described in
 [docs/valves.md](docs/valves.md), generated from the code so it is always
@@ -120,6 +137,12 @@ model id is `claude_code.claude-code`.
 
 The status line shows `Session: new chat`, then tool activity, then the Done
 line. A second message shows `Session: resumed`.
+
+### Uninstall
+
+Disable and delete the function in Admin Panel → Functions, then remove
+`WORKDIR_ROOT` (and `CLAUDE_CONFIG_DIR` if you set one). Nothing else is
+written outside those two directories and Open WebUI's own database.
 
 ## How it works
 
@@ -166,7 +189,7 @@ Read this before exposing the function to anyone but yourself.
   did not already reach; it only sets the working directory.
 - **`SETTING_SOURCES`** loads the host user's `~/.claude` (with `user`),
   which can define hooks that execute code. Leave it empty unless you
-  control the host account.
+  control the host account; see [Persistent context](#persistent-context).
 - **What the redactor catches:** prefix-shaped credentials (Anthropic,
   OpenAI, Slack, GitHub, Google, AWS, 1Password, JWTs) and PEM private keys,
   in the reply and in status events. **What it cannot catch:** bare UUID
@@ -179,6 +202,31 @@ Read this before exposing the function to anyone but yourself.
   CLI's own sandbox flag, not an actual sandbox.
 
 Report a vulnerability as described in [SECURITY.md](SECURITY.md).
+
+## Persistent context
+
+By default the pipe passes `setting_sources=[]` to the SDK: each chat starts
+from a clean baseline and inherits nothing from the host user's `~/.claude/`
+or the workdir's `.claude/`. That is the safe default for anything shared.
+
+On a single-user instance, standing instructions in `~/.claude/CLAUDE.md`
+(a host inventory, house rules) can be loaded into every chat with the
+`SETTING_SOURCES` valve:
+
+| Value | Loads |
+|---|---|
+| *(empty)* | Nothing; isolated baseline (default). |
+| `user` | `~/.claude/CLAUDE.md` **and** `~/.claude/settings.json`. |
+| `project` | The working directory's `CLAUDE.md` and `.claude/settings.json`; what makes `#repo:` chats pick up a repository's own instructions. |
+| `user,project,local` | Both of the above plus `.claude/settings.local.json`. |
+
+Unknown tokens are dropped. There is no way to load a `CLAUDE.md` without
+also loading the `settings.json` next to it: that coupling is Claude Code's,
+not the pipe's, and `settings.json` can define hooks that run shell commands,
+permission grants, environment variables and MCP servers, for every chat,
+as the Open WebUI process user, under `bypassPermissions`. With
+`CLAUDE_CONFIG_DIR` set, `user` reads from that directory instead of
+`~/.claude`.
 
 ## Open WebUI coupling
 

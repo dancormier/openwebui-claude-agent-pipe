@@ -12,12 +12,12 @@ this runs with zero packages installed.
                           [--known-env NAME[,NAME...]] < raw > clean
 
 Known-value redaction. The pipe's patterns are prefix-anchored, which cannot
-recognise a bare uuid (TICKTICK_ACCESS_TOKEN), an arbitrary word (NTFY_TOPIC)
-or a password (MACOS_KEYCHAIN_PASSWORD). A caller that can load the live
-values names them instead: `--known-from-tpl` takes the `export NAME=` lines
-of secrets.tpl (names only — values come from this process's environment,
-which the caller fills by sourcing ~/.secrets in a subshell around this
-command), `--known-env` names variables directly. Every value present is
+recognise a bare uuid, an arbitrary word (a notification topic) or a
+password. A caller that can load the live values names them instead:
+`--known-from-tpl` takes the `export NAME=` lines of a secrets template
+(names only — values come from this process's environment, which the caller
+fills by sourcing its secrets file in a subshell around this command),
+`--known-env` names variables directly. Every value present is
 scrubbed as its exact text and as its base64, urlsafe-base64, hex and
 URL-encoded forms, after the pattern pass. Values shorter than 8 characters
 are skipped: nothing distinguishes them from prose, and scrubbing every
