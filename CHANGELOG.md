@@ -6,6 +6,13 @@ comments and the homelab PRs that introduced them.
 
 ## Unreleased (2026-09-02)
 
+- Fresh-install smoke test passed against a throwaway
+  `ghcr.io/open-webui/open-webui:main` container (Linux, root, bind-mounted
+  `WORKDIR_ROOT`): install from the README alone, a plain reply, a tool call
+  with an artifact link, `ask_user` over the API (markdown path) and in the
+  browser (form path), and a warm resume. README gained the two things it got
+  wrong: `OFFLINE_MODE` skips the `requirements:` install, and the API
+  endpoints for valves, toggle and the model id.
 - Portability off the author's machine: the in-process MCP servers are
   named `knowledge`, `chats` and `ask-user` (tool names
   `mcp__knowledge__*`, `mcp__chats__*`); every Open WebUI internal import
