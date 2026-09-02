@@ -95,7 +95,7 @@ def _build_kb_mcp_server(
     that OpenWebUI's middleware already filtered by the user's grants.
     """
     if not knowledge:
-        return None, [], {}
+        return None, []
 
     collection_names = [k["id"] for k in knowledge]
     display = ", ".join(k["name"] for k in knowledge)
@@ -431,7 +431,6 @@ def _build_kb_mcp_server(
 
     tools_list = [_search]
     tool_names = ["mcp__helm-kb__search_knowledge"]
-    tools_by_name: Dict[str, Any] = {"search_knowledge": _search}
     if kb_ids:
         tools_list.extend([_list_docs, _read_doc, _grep])
         tool_names.extend(
@@ -441,148 +440,6 @@ def _build_kb_mcp_server(
                 "mcp__helm-kb__grep_knowledge",
             ]
         )
-        tools_by_name.update(
-            {
-                "list_knowledge_documents": _list_docs,
-                "read_knowledge_document": _read_doc,
-                "grep_knowledge": _grep,
-            }
-        )
 
     server = create_sdk_mcp_server("helm-kb", "0.1", tools=tools_list)
-    return server, tool_names, tools_by_name
-
-
-def _anthropic_kb_tool_defs(
-    knowledge: List[Dict[str, str]], has_kb_ids: bool
-) -> List[Dict[str, Any]]:
-    """JSON-Schema tool definitions for the Anthropic Messages API. Kept
-    in sync with `_build_kb_mcp_server`'s tools (same names & input fields)
-    so Claude sees an identical toolbox regardless of which path is active."""
-    if not knowledge:
-        return []
-    display = ", ".join(k["name"] for k in knowledge)
-    defs: List[Dict[str, Any]] = [
-        {
-            "name": "search_knowledge",
-            "description": (
-                f"Search the attached knowledge base(s): {display}. "
-                "Call whenever you need internal facts, prior guidance, or "
-                "documented product/process details. Reformulate and search "
-                "multiple times if the first query misses."
-            ),
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string"},
-                    "top_k": {"type": "integer"},
-                },
-                "required": ["query"],
-            },
-        }
-    ]
-    if has_kb_ids:
-        defs.extend(
-            [
-                {
-                    "name": "list_knowledge_documents",
-                    "description": (
-                        f"List every document in {display}. "
-                        "Returns file_id, filename, and size for each."
-                    ),
-                    "input_schema": {"type": "object", "properties": {}},
-                },
-                {
-                    "name": "read_knowledge_document",
-                    "description": (
-                        "Read full content (or a character range) of a "
-                        "knowledge document by file_id. Omit start_char / "
-                        "end_char to read the whole file. Caps at 40 000 "
-                        "chars per call — page using start_char to continue."
-                    ),
-                    "input_schema": {
-                        "type": "object",
-                        "properties": {
-                            "file_id": {"type": "string"},
-                            "start_char": {"type": "integer"},
-                            "end_char": {"type": "integer"},
-                        },
-                        "required": ["file_id"],
-                    },
-                },
-                {
-                    "name": "grep_knowledge",
-                    "description": (
-                        "Regex/substring search across knowledge documents. "
-                        "Fast (runs on pre-extracted text in the DB). Use for "
-                        "exact keywords, product codes, acronyms where vector "
-                        "search struggles."
-                    ),
-                    "input_schema": {
-                        "type": "object",
-                        "properties": {
-                            "pattern": {"type": "string"},
-                            "file_id": {"type": "string"},
-                            "case_insensitive": {"type": "boolean"},
-                            "max_matches": {"type": "integer"},
-                        },
-                        "required": ["pattern"],
-                    },
-                },
-            ]
-        )
-    return defs
-
-
-async def _dispatch_kb_tool(
-    name: str,
-    args: Dict[str, Any],
-    tools_by_name: Dict[str, Any],
-) -> str:
-    """Call a KB tool by name and unwrap its MCP-format result into plain
-    text suitable for returning as an Anthropic tool_result content block."""
-    sdk_tool = tools_by_name.get(name)
-    if sdk_tool is None:
-        return f"Unknown tool: {name}"
-    try:
-        result = await sdk_tool.handler(args or {})
-    except Exception as exc:
-        log.exception("KB tool %s failed", name)
-        return f"Tool {name} failed: {exc}"
-    content = result.get("content") or []
-    if isinstance(content, list) and content:
-        first = content[0]
-        if isinstance(first, dict):
-            return first.get("text", "")
-    return ""
-
-
-# ---------------------------------------------------------------------------
-# Fast-path gate: decide whether a turn needs the full Claude Code agent loop
-# (CLI + MCP + tool-use deliberation, ~3–5 s overhead) or can ride the cheap
-# Messages-API path (~300 ms – 2 s). Same model on both sides — the split is
-# about mode, not model.
-# ---------------------------------------------------------------------------
-
-_AGENT_PATTERN = re.compile(
-    r"\b("
-    r"plot|chart|graph|pdf|"
-    r"create\s+(a\s+)?file|save\s+(to\s+|as\s+)?(a\s+)?file|"
-    r"generate\s+(a\s+)?(pdf|file|chart|plot|image|report)|"
-    r"run\s+(this\s+)?(code|script|command|bash|python)|"
-    r"execute\s+(code|script|this|the)|"
-    r"download|fetch\s+(from|url|the\s+url)|"
-    r"analyze\s+(the\s+|this\s+)?(file|doc|document|csv|spreadsheet|data)|"
-    r"read\s+(the\s+|this\s+)?(file|doc|document)|"
-    r"write\s+(to\s+)?(a\s+)?file|edit\s+\S+\.\w+|"
-    r"make\s+(a\s+|me\s+a\s+)?(plot|chart|pdf|graph|visualization|viz)"
-    r")\b",
-    re.IGNORECASE,
-)
-
-# Mentioning a file extension is a strong "the user has / wants a file" signal.
-_FILE_EXT_PATTERN = re.compile(
-    r"\.(pdf|csv|tsv|xlsx|xls|docx|pptx|png|jpe?g|svg|html?|json|md|ipynb|zip|tar\.gz)\b",
-    re.IGNORECASE,
-)
-
+    return server, tool_names
