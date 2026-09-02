@@ -151,6 +151,15 @@ chunks, status = mod._on_tool_use("Task", {"subagent_type": "coder"}, "task2", s
 check("task with no description: type only", status == "🔧 🤖 coder", status)
 chunks, status = mod._on_tool_result("task2", True, "boom", st, False, 40.0)
 check("task error: hiccup status, agent released", status == "⚙️ tool hiccup (retrying)" and "task2" not in st.agents)
+st = mod._TurnState()
+chunks, status = mod._on_tool_use("Agent", {"subagent_type": "researcher", "description": "Look up X", "prompt": "..."}, "a1", st, False, 0.0)
+check("Agent (renamed Task) registers a subagent", status == "🔧 🤖 researcher: Look up X" and "a1" in st.agents, status)
+chunks, status = mod._on_tool_use("Read", {"file_path": "/x"}, "r1", st, False, 1.0, parent_id="a1")
+check("tool under Agent labeled", status == "🔧 ↳ researcher: Look up X · Read: /x", status)
+mod._on_tool_result("r1", False, "", st, False, 2.0)
+chunks, status = mod._on_tool_result("a1", False, "done", st, False, 9.0)
+check("Agent result closes with summary", status == "✅ researcher: Look up X · 1 tool · 9s", status)
+
 check("done line counts subagents", mod._done_line(5000, 3, "", 2) == "Done · 5s · 3 tools · 2 subagents", mod._done_line(5000, 3, "", 2))
 check("done line: one subagent singular", mod._done_line(None, 0, "", 1) == "Done · 1 subagent")
 

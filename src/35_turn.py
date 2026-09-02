@@ -8,6 +8,7 @@ _TOOL_PREVIEW_FIELDS = {
     "WebSearch": "query",
     "WebFetch": "url",
     "Task": "description",
+    "Agent": "description",
 }
 
 
@@ -162,6 +163,11 @@ def _on_stream_event(ev: Dict[str, Any], state: _TurnState, inline_details: bool
     return chunks, status
 
 
+# Claude Code renamed its delegation tool from Task to Agent (2.1.x); the
+# SDK surfaces whichever name the installed CLI uses.
+_DELEGATION_TOOLS = ("Task", "Agent")
+
+
 def _agent_label(tool_input: Dict[str, Any]) -> str:
     kind = str(tool_input.get("subagent_type") or "agent")
     desc = str(tool_input.get("description") or "").strip()
@@ -178,13 +184,13 @@ def _on_tool_use(
     parent_id: Optional[str] = None,
 ) -> _Handled:
     """A completed tool call → status line, heartbeat registration, and the
-    collapsed input block. A `Task` call registers a subagent; calls made by
+    collapsed input block. A delegation call registers a subagent; calls made by
     a subagent (parent_id set) are labeled under it. The <summary> is plain
     text on purpose: Open WebUI strips inline HTML inside it and escapes its
     content itself, so neither tags nor pre-escaping survive."""
     preview = _tool_preview(name, tool_input)
     label = f"{name}: {preview}" if preview else name
-    if name == "Task" and parent_id is None:
+    if name in _DELEGATION_TOOLS and parent_id is None:
         state.agents[tool_id] = {
             "label": _agent_label(tool_input), "tools": 0, "started": now,
         }
