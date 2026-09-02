@@ -6,6 +6,13 @@ comments and the homelab PRs that introduced them.
 
 ## Unreleased (2026-09-02)
 
+- The disabled fast path is gone: `_run_fast`, `_run_messages_api`,
+  `_run_lite_agent`, the `_needs_agent` routing heuristic and its regexes, and
+  the Messages-API tool definitions / dispatcher for the knowledge tools. None
+  of it had a caller since routing was pinned to the full agent loop, and it
+  carried a second, untested copy of the stream handlers. `/agent` and `/fast`
+  prefixes are still stripped. `anthropic` leaves the requirements line;
+  `_build_kb_mcp_server` returns `(server, tool_names)`.
 - `search_chats` / `read_chat` tools (`SESSION_SEARCH` valve, default on;
   `CHAT_DB_PATH` overrides the sqlite path): the agent can find and read the
   calling user's earlier chats in this Open WebUI when they refer to a past

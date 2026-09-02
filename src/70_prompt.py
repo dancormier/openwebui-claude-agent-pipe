@@ -25,26 +25,6 @@ def _parse_setting_sources(raw: str) -> List[str]:
     ]
 
 
-def _needs_agent(prompt: str, files: Optional[List[Any]]) -> bool:
-    """Route-per-turn heuristic. `/agent` / `/fast` prefixes are explicit
-    overrides. Attachments force agent mode (the model should be able to
-    read them). Otherwise: look for keywords and file-extension mentions."""
-    if not prompt:
-        return False
-    stripped = prompt.lstrip()
-    if stripped.startswith("/agent"):
-        return True
-    if stripped.startswith("/fast"):
-        return False
-    if files:
-        return True
-    if _AGENT_PATTERN.search(stripped):
-        return True
-    if _FILE_EXT_PATTERN.search(stripped):
-        return True
-    return False
-
-
 def _extract_latest_user_prompt(body: Dict[str, Any]) -> str:
     messages = body.get("messages") or []
     for message in reversed(messages):
