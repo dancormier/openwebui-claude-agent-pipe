@@ -7,6 +7,18 @@ tools, behind a normal chat UI, billed to your Claude subscription. It is for
 one person (or one trusted admin) who already runs Open WebUI and wants Claude
 Code in it, on the web and on mobile clients, rather than only in a terminal.
 
+## Credit
+
+This is a fork of Thomas Friedel's
+[openwebui-claude-code](https://github.com/tfriedel/openwebui-claude-code)
+(MIT), taken at commit `5bbc1fc`. He built the bridge: the pipe, the valves,
+the knowledge-base tools, inline tool details, image attachments, and the
+artifact scanner are his work and still form the backbone of this file. This
+repo adds durable sessions, output redaction, the status stream, `ask_user`,
+chat search, and the rest of the [changelog](CHANGELOG.md) on top, and
+maintains it now that upstream has gone quiet. If you find it useful, his
+repo is where the idea came from.
+
 ## Features
 
 - **Real agent loop** — Read/Write/Edit/Bash/Glob/Grep/WebSearch/WebFetch and
@@ -214,9 +226,7 @@ redeploys. The author's own deploy wrapper (backup, post, verify parity, run
 the suites against the deployed copy) lives in a separate homelab repo and is
 not needed to use this one.
 
-## Attribution
+## License
 
-Fork of [tfriedel/openwebui-claude-code](https://github.com/tfriedel/openwebui-claude-code)
-(MIT) at commit `5bbc1fc`, which has been dormant since. The upstream shape
-(one pipe, valves, knowledge tools, inline tool details) is Thomas Friedel's;
-the patches listed in the changelog are this repo's. MIT, see [LICENSE](LICENSE).
+MIT, see [LICENSE](LICENSE). Copyright is shared with the upstream author, as
+the file says.
