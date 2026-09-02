@@ -125,7 +125,7 @@ check("form other object → its text, stripped", r["answers"]["busy"] == "wait 
 r = mod._map_user_input_response({"answers": {"q1": {"type": "other", "text": "  "}}}, norm)
 check("blank other text → unanswered", r["status"] == "unanswered")
 for name, out in [
-    ("error", {"error": "timed out"}),
+    ("timeout", {"error": "Event call timed out. The browser tab may be inactive or closed."}),
     ("cancelled", {"status": "cancelled"}),
     ("non-dict", None),
     ("no answers key", {"status": "answered"}),
@@ -133,7 +133,10 @@ for name, out in [
 ]:
     r = mod._map_user_input_response(out, norm)
     check(f"{name} → unanswered with instruction", r["status"] == "unanswered" and r["instruction"] == mod._ASK_USER_UNANSWERED_INSTRUCTION, r)
-check("error reason carried", mod._map_user_input_response({"error": "timed out"}, norm)["reason"] == "timed out")
+check("timeout reason carried", "timed out" in mod._map_user_input_response({"error": "Event call timed out."}, norm)["reason"])
+for name, err in [("client without a form", "Invalid user input request."), ("dropped session", "Client session disconnected.")]:
+    r = mod._map_user_input_response({"error": err}, norm)
+    check(f"{name} → no_ui with the markdown", r["status"] == "no_ui" and r["ask_in_reply"] == md and r["reason"] == err, r)
 
 # ---- no-UI result ----
 r = mod._no_ui_result(norm)
