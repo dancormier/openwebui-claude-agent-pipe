@@ -1,0 +1,30 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      # The suites slice the pipe's module head and exec it with pydantic
+      # stubbed, so they need only the stdlib — no SDK install, no Open WebUI.
+      - name: Compile
+        run: python3 -m py_compile claude_agent_pipe.py redact_stdin.py
+
+      - name: Suites
+        if: ${{ !cancelled() }}
+        run: |
+          for t in test_*.py; do
+            echo "== $t"
+            python3 "$t"
+          done
