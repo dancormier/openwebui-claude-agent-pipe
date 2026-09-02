@@ -6,6 +6,10 @@ comments and the homelab PRs that introduced them.
 
 ## Unreleased
 
+- The /tmp artifact scan is now opt-in (`SCAN_TMP_ARTIFACTS`, default
+  off): /tmp is shared by every user of the host, so on a multi-user
+  deployment one chat could pick up an image another chat wrote in the same
+  window. Single-user hosts that want the old behaviour turn it on.
 - Container hardening from the pre-release review: a `CLAUDE_CONFIG_DIR`
   valve so the Claude Code CLI's own session state can live on a persistent
   path (empty inherits `$HOME/.claude`, as before); an unwritable

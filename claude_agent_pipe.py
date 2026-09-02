@@ -2415,6 +2415,16 @@ class Pipe:
                 "0 falls back to the SDK default."
             ),
         )
+        SCAN_TMP_ARTIFACTS: bool = Field(
+            default=False,
+            description=(
+                "Also scan /tmp for files the agent created during the turn "
+                "and attach them to the reply (the agent often writes there "
+                "from habit). /tmp is shared by every user of the host, so a "
+                "file another chat wrote in the same window would be "
+                "attached too — enable on single-user hosts only."
+            ),
+        )
         SETTING_SOURCES: str = Field(
             default="",
             description=(
@@ -2864,8 +2874,10 @@ class Pipe:
         await emit_status("Starting Claude Code…")
         # Claude often saves generated files to /tmp from habit (absolute paths
         # in matplotlib/PIL examples), even though cwd is the chat workdir.
-        # Scan both so we don't miss the image.
-        scan_dirs = [workdir, Path("/tmp")]
+        # /tmp is shared by every user of the host, so scanning it is opt-in.
+        scan_dirs = [workdir]
+        if self.valves.SCAN_TMP_ARTIFACTS:
+            scan_dirs.append(Path("/tmp"))
         artifact_snapshot = _snapshot_artifacts(scan_dirs)
 
         state = _TurnState()
