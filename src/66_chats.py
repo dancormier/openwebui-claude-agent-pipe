@@ -1,6 +1,8 @@
 def _owui_db_path(override: str = "") -> Optional[str]:
     if override:
         return override
+    if not _db_is_sqlite(os.environ.get("DATABASE_URL", "")):
+        return None
     # open_webui.env sys.exit()s when imported outside a configured server,
     # so a plain `except Exception` would let that unwind the whole turn.
     try:
@@ -33,7 +35,7 @@ def _build_chats_mcp_server(
     @tool(
         "search_chats",
         (
-            "Search the user's earlier chats in this gateway by keyword. Use "
+            "Search the user's earlier chats in this Open WebUI by keyword. Use "
             "when they refer to a past conversation ('what did we decide "
             "about X', 'the plan we made last week'). Returns the best "
             "matches with a snippet and a chat_id for read_chat."
@@ -107,11 +109,11 @@ def _build_chats_mcp_server(
         body = _chat_transcript(_chat_turns(blob), max_chars)
         return _text(f"# {title or '(untitled)'} · last updated {when}\n\n{body}")
 
-    server = create_sdk_mcp_server("hub-chats", "0.1", tools=[_search, _read])
+    server = create_sdk_mcp_server("chats", "0.1", tools=[_search, _read])
     # Same reason as ask_user: behind ToolSearch the model never reaches for it.
     return {**server, "alwaysLoad": True}, [
-        "mcp__hub-chats__search_chats",
-        "mcp__hub-chats__read_chat",
+        "mcp__chats__search_chats",
+        "mcp__chats__read_chat",
     ]
 
 

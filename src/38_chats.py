@@ -7,6 +7,14 @@
 # ---------------------------------------------------------------------------
 
 _CHAT_SEARCH_MAX_ROWS = 2000
+
+
+def _db_is_sqlite(database_url: str) -> bool:
+    """Open WebUI's DATABASE_URL: empty means its default sqlite file; a
+    sqlite:// URL is fine too; anything else (postgres, mysql) has no
+    `webui.db` to open and the chat tools must say so instead of tracing."""
+    url = (database_url or "").strip().lower()
+    return not url or url.startswith("sqlite")
 _CHAT_SEARCH_DEFAULT_LIMIT = 8
 _CHAT_READ_MAX_CHARS = 40_000
 

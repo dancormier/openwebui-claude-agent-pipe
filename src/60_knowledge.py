@@ -245,7 +245,11 @@ def _build_kb_mcp_server(
     kb_ids: List[str] = list(knowledge_row_ids or [])
 
     async def _iter_scoped_files():
-        from open_webui.models.knowledge import Knowledges
+        try:
+            from open_webui.models.knowledge import Knowledges
+        except Exception:
+            log.warning("knowledge listing unavailable", exc_info=True)
+            return
 
         for kid in kb_ids:
             try:
@@ -303,7 +307,10 @@ def _build_kb_mcp_server(
         {"file_id": str, "start_char": int, "end_char": int},
     )
     async def _read_doc(args: Dict[str, Any]) -> Dict[str, Any]:
-        from open_webui.models.files import Files
+        try:
+            from open_webui.models.files import Files
+        except Exception as exc:
+            return {"content": [{"type": "text", "text": f"Knowledge read unavailable: {exc}"}]}
 
         file_id = str(args.get("file_id") or "").strip()
         if not file_id:
@@ -430,16 +437,16 @@ def _build_kb_mcp_server(
         return {"content": [{"type": "text", "text": header + "\n".join(hits)}]}
 
     tools_list = [_search]
-    tool_names = ["mcp__helm-kb__search_knowledge"]
+    tool_names = ["mcp__knowledge__search_knowledge"]
     if kb_ids:
         tools_list.extend([_list_docs, _read_doc, _grep])
         tool_names.extend(
             [
-                "mcp__helm-kb__list_knowledge_documents",
-                "mcp__helm-kb__read_knowledge_document",
-                "mcp__helm-kb__grep_knowledge",
+                "mcp__knowledge__list_knowledge_documents",
+                "mcp__knowledge__read_knowledge_document",
+                "mcp__knowledge__grep_knowledge",
             ]
         )
 
-    server = create_sdk_mcp_server("helm-kb", "0.1", tools=tools_list)
+    server = create_sdk_mcp_server("knowledge", "0.1", tools=tools_list)
     return server, tool_names
