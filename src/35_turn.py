@@ -11,10 +11,15 @@ _TOOL_PREVIEW_FIELDS = {
     "Agent": "description",
 }
 
+_TOOL_PREVIEW_CUSTOM = {_ASK_USER_TOOL: _ask_user_preview}
+
 
 def _tool_preview(name: str, tool_input: Dict[str, Any]) -> str:
     key = _TOOL_PREVIEW_FIELDS.get(name)
-    if key and key in tool_input:
+    custom = _TOOL_PREVIEW_CUSTOM.get(name)
+    if custom:
+        raw = custom(tool_input)
+    elif key and key in tool_input:
         raw = str(tool_input[key])
     elif tool_input:
         raw = ", ".join(f"{k}={str(v)[:40]}" for k, v in list(tool_input.items())[:2])
