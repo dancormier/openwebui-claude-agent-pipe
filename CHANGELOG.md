@@ -6,6 +6,14 @@ comments and the homelab PRs that introduced them.
 
 ## Unreleased (2026-09-02)
 
+- Portability off the author's machine: the in-process MCP servers are
+  named `knowledge`, `chats` and `ask-user` (tool names
+  `mcp__knowledge__*`, `mcp__chats__*`); every Open WebUI internal import
+  is guarded so a moved module degrades one feature instead of failing the
+  turn; chat search reports itself unavailable when `DATABASE_URL` is not
+  sqlite (`_db_is_sqlite`, covered by `test_chats.py`) instead of hunting
+  for a `webui.db` that does not exist; docstrings no longer describe the
+  author's job tooling.
 - Docs for a stranger: README rewritten around install, how it works, and
   security; `docs/valves.md` generated from the `Valves` class by `build.py`
   (and checked by `--check`); CONTRIBUTING, SECURITY, a PR template, and the
@@ -89,7 +97,7 @@ comments and the homelab PRs that introduced them.
    the turn cold once.
    **Conduit is not always keyless** (verified 2026-08-11): it carries the
    `chat_id` for a chat started elsewhere, so a desktop → iOS handoff mid-thread
-   arrives *keyed* and resumes via patch 7, workdir `~/hub/<chat_id>/`. Which
+   arrives *keyed* and resumes via patch 7, workdir `WORKDIR_ROOT/<chat_id>/`. Which
    path a turn took is visible in the workdir name — `anon-*` means keyless.
 9. **Repo-aware workdir** — `#repo:<name>` on a chat's first message runs the
    chat in an allowlisted repo (`REPO_MAP` valve) instead of the scratch

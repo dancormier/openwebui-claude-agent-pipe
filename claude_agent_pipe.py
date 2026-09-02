@@ -1,7 +1,7 @@
 """
 title: Claude Code
 description: Run Claude Code's agent loop from inside OpenWebUI chats via the Claude Agent SDK.
-author: Thomas Friedel
+author: Dan Cormier, Thomas Friedel
 version: 0.1.0
 license: MIT
 requirements: claude-agent-sdk>=0.2.116
@@ -397,12 +397,12 @@ def _gateway_contract(cwd: str, workdir_root: str, contract_path: str) -> str:
     """The gateway contract to append when the agent's cwd won't supply it.
 
     A `#repo:` session runs with cwd set to the mapped repo, so the SDK loads
-    THAT repo's CLAUDE.md and never reads `hub/AGENTS.md`. On 2026-07-27 that
-    meant `#repo:<name>` sessions ran with no response contract, no async
-    rules, and no Hard Rules — under bypassPermissions — because the repo had
-    no root instruction file at all. Adding one per repo fixes the repos we
-    remember; this fixes the class, including the next REPO_MAP entry someone
-    adds without one.
+    THAT repo's CLAUDE.md and never sees the operator's own rules file. On
+    2026-07-27 that meant `#repo:<name>` sessions ran with no operator rules
+    at all — under bypassPermissions — because the repo had no root
+    instruction file. Adding one per repo fixes the repos we remember; this
+    fixes the class, including the next REPO_MAP entry someone adds without
+    one.
 
     Returns "" when cwd is inside WORKDIR_ROOT: those sessions already load
     `<WORKDIR_ROOT>/CLAUDE.md`, and appending several KB to every turn on top
@@ -453,16 +453,15 @@ def _agent_env(chat_id: Optional[str]) -> Dict[str, str]:
 
     The agent has no other way to learn which chat it is serving: its cwd is a
     scratch workdir (or, in a #repo: session, a repo that says nothing about
-    the chat), so `hub-async.sh` used to be told to guess the id from
-    `basename $PWD`. Passing it explicitly retires that guess.
+    the chat). Tooling the agent runs (the author's background-job submitter,
+    which posts a result back into the originating chat) reads this variable;
+    nothing in this repo does.
 
-    Set only when an id exists — never as an empty string. `hub-async.sh`
-    treats "unset" as "this session cannot receive an async result", which is
-    also how nested async jobs are blocked: `hub-async-worker.sh` strips
-    HUB_CHAT_ID from the environment it hands `claude -p` (`env -u`), so a
-    `submit` inside a running job dies for want of a chat. Note that stripping
-    is required, not incidental — the worker inherits this variable from the
-    submitting agent through `hub-async.sh`'s `os.execv`.
+    Set only when an id exists — never as an empty string. Consumers treat
+    "unset" as "this session has no chat to deliver into", and a worker that
+    spawns nested agents must strip the variable (`env -u HUB_CHAT_ID`)
+    rather than rely on it being absent, because a child inherits the whole
+    environment.
     """
     return {"HUB_CHAT_ID": chat_id} if chat_id else {}
 
@@ -1031,6 +1030,14 @@ def _done_line(
 # ---------------------------------------------------------------------------
 
 _CHAT_SEARCH_MAX_ROWS = 2000
+
+
+def _db_is_sqlite(database_url: str) -> bool:
+    """Open WebUI's DATABASE_URL: empty means its default sqlite file; a
+    sqlite:// URL is fine too; anything else (postgres, mysql) has no
+    `webui.db` to open and the chat tools must say so instead of tracing."""
+    url = (database_url or "").strip().lower()
+    return not url or url.startswith("sqlite")
 _CHAT_SEARCH_DEFAULT_LIMIT = 8
 _CHAT_READ_MAX_CHARS = 40_000
 
@@ -1620,7 +1627,11 @@ def _build_kb_mcp_server(
     kb_ids: List[str] = list(knowledge_row_ids or [])
 
     async def _iter_scoped_files():
-        from open_webui.models.knowledge import Knowledges
+        try:
+            from open_webui.models.knowledge import Knowledges
+        except Exception:
+            log.warning("knowledge listing unavailable", exc_info=True)
+            return
 
         for kid in kb_ids:
             try:
@@ -1678,7 +1689,10 @@ def _build_kb_mcp_server(
         {"file_id": str, "start_char": int, "end_char": int},
     )
     async def _read_doc(args: Dict[str, Any]) -> Dict[str, Any]:
-        from open_webui.models.files import Files
+        try:
+            from open_webui.models.files import Files
+        except Exception as exc:
+            return {"content": [{"type": "text", "text": f"Knowledge read unavailable: {exc}"}]}
 
         file_id = str(args.get("file_id") or "").strip()
         if not file_id:
@@ -1805,18 +1819,18 @@ def _build_kb_mcp_server(
         return {"content": [{"type": "text", "text": header + "\n".join(hits)}]}
 
     tools_list = [_search]
-    tool_names = ["mcp__helm-kb__search_knowledge"]
+    tool_names = ["mcp__knowledge__search_knowledge"]
     if kb_ids:
         tools_list.extend([_list_docs, _read_doc, _grep])
         tool_names.extend(
             [
-                "mcp__helm-kb__list_knowledge_documents",
-                "mcp__helm-kb__read_knowledge_document",
-                "mcp__helm-kb__grep_knowledge",
+                "mcp__knowledge__list_knowledge_documents",
+                "mcp__knowledge__read_knowledge_document",
+                "mcp__knowledge__grep_knowledge",
             ]
         )
 
-    server = create_sdk_mcp_server("helm-kb", "0.1", tools=tools_list)
+    server = create_sdk_mcp_server("knowledge", "0.1", tools=tools_list)
     return server, tool_names
 
 def _build_ask_user_mcp_server(
@@ -1937,6 +1951,8 @@ _ASK_USER_PROMPT = (
 def _owui_db_path(override: str = "") -> Optional[str]:
     if override:
         return override
+    if not _db_is_sqlite(os.environ.get("DATABASE_URL", "")):
+        return None
     # open_webui.env sys.exit()s when imported outside a configured server,
     # so a plain `except Exception` would let that unwind the whole turn.
     try:
@@ -1969,7 +1985,7 @@ def _build_chats_mcp_server(
     @tool(
         "search_chats",
         (
-            "Search the user's earlier chats in this gateway by keyword. Use "
+            "Search the user's earlier chats in this Open WebUI by keyword. Use "
             "when they refer to a past conversation ('what did we decide "
             "about X', 'the plan we made last week'). Returns the best "
             "matches with a snippet and a chat_id for read_chat."
@@ -2043,11 +2059,11 @@ def _build_chats_mcp_server(
         body = _chat_transcript(_chat_turns(blob), max_chars)
         return _text(f"# {title or '(untitled)'} · last updated {when}\n\n{body}")
 
-    server = create_sdk_mcp_server("hub-chats", "0.1", tools=[_search, _read])
+    server = create_sdk_mcp_server("chats", "0.1", tools=[_search, _read])
     # Same reason as ask_user: behind ToolSearch the model never reaches for it.
     return {**server, "alwaysLoad": True}, [
-        "mcp__hub-chats__search_chats",
-        "mcp__hub-chats__read_chat",
+        "mcp__chats__search_chats",
+        "mcp__chats__read_chat",
     ]
 
 
@@ -2559,8 +2575,8 @@ class Pipe:
         # in this client's `ClaudeAgentOptions.env`. `_agent_env` returning `{}`
         # means "inherit", not "guaranteed unset" — so for a caller with no chat
         # id, an ambient HUB_CHAT_ID in Open WebUI's own environment would flow
-        # straight through to the agent, and `hub-async.sh` would deliver that
-        # session's async result into someone else's conversation. Clearing it
+        # straight through to the agent, and any tooling that delivers results
+        # by chat id would post into someone else's conversation. Clearing it
         # here makes the per-client value the only path there is.
         os.environ.pop("HUB_CHAT_ID", None)
 
@@ -2695,7 +2711,7 @@ class Pipe:
         allowed_tools = allowed_tools + kb_tool_names
         mcp_servers: Dict[str, Any] = {}
         if kb_server is not None:
-            mcp_servers["helm-kb"] = kb_server
+            mcp_servers["knowledge"] = kb_server
         if self.valves.ASK_USER:
             ask_server, ask_tool_names = _build_ask_user_mcp_server(event_call)
             mcp_servers["ask-user"] = ask_server
@@ -2707,7 +2723,7 @@ class Pipe:
                 _owui_db_path(self.valves.CHAT_DB_PATH.strip()),
             )
             if chats_server is not None:
-                mcp_servers["hub-chats"] = chats_server
+                mcp_servers["chats"] = chats_server
                 allowed_tools = allowed_tools + chats_tool_names
 
         options_kwargs: Dict[str, Any] = {

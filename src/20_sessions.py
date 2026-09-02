@@ -171,12 +171,12 @@ def _gateway_contract(cwd: str, workdir_root: str, contract_path: str) -> str:
     """The gateway contract to append when the agent's cwd won't supply it.
 
     A `#repo:` session runs with cwd set to the mapped repo, so the SDK loads
-    THAT repo's CLAUDE.md and never reads `hub/AGENTS.md`. On 2026-07-27 that
-    meant `#repo:<name>` sessions ran with no response contract, no async
-    rules, and no Hard Rules — under bypassPermissions — because the repo had
-    no root instruction file at all. Adding one per repo fixes the repos we
-    remember; this fixes the class, including the next REPO_MAP entry someone
-    adds without one.
+    THAT repo's CLAUDE.md and never sees the operator's own rules file. On
+    2026-07-27 that meant `#repo:<name>` sessions ran with no operator rules
+    at all — under bypassPermissions — because the repo had no root
+    instruction file. Adding one per repo fixes the repos we remember; this
+    fixes the class, including the next REPO_MAP entry someone adds without
+    one.
 
     Returns "" when cwd is inside WORKDIR_ROOT: those sessions already load
     `<WORKDIR_ROOT>/CLAUDE.md`, and appending several KB to every turn on top
@@ -227,16 +227,15 @@ def _agent_env(chat_id: Optional[str]) -> Dict[str, str]:
 
     The agent has no other way to learn which chat it is serving: its cwd is a
     scratch workdir (or, in a #repo: session, a repo that says nothing about
-    the chat), so `hub-async.sh` used to be told to guess the id from
-    `basename $PWD`. Passing it explicitly retires that guess.
+    the chat). Tooling the agent runs (the author's background-job submitter,
+    which posts a result back into the originating chat) reads this variable;
+    nothing in this repo does.
 
-    Set only when an id exists — never as an empty string. `hub-async.sh`
-    treats "unset" as "this session cannot receive an async result", which is
-    also how nested async jobs are blocked: `hub-async-worker.sh` strips
-    HUB_CHAT_ID from the environment it hands `claude -p` (`env -u`), so a
-    `submit` inside a running job dies for want of a chat. Note that stripping
-    is required, not incidental — the worker inherits this variable from the
-    submitting agent through `hub-async.sh`'s `os.execv`.
+    Set only when an id exists — never as an empty string. Consumers treat
+    "unset" as "this session has no chat to deliver into", and a worker that
+    spawns nested agents must strip the variable (`env -u HUB_CHAT_ID`)
+    rather than rely on it being absent, because a child inherits the whole
+    environment.
     """
     return {"HUB_CHAT_ID": chat_id} if chat_id else {}
 

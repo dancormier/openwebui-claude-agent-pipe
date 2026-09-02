@@ -320,8 +320,8 @@
         # in this client's `ClaudeAgentOptions.env`. `_agent_env` returning `{}`
         # means "inherit", not "guaranteed unset" — so for a caller with no chat
         # id, an ambient HUB_CHAT_ID in Open WebUI's own environment would flow
-        # straight through to the agent, and `hub-async.sh` would deliver that
-        # session's async result into someone else's conversation. Clearing it
+        # straight through to the agent, and any tooling that delivers results
+        # by chat id would post into someone else's conversation. Clearing it
         # here makes the per-client value the only path there is.
         os.environ.pop("HUB_CHAT_ID", None)
 
@@ -456,7 +456,7 @@
         allowed_tools = allowed_tools + kb_tool_names
         mcp_servers: Dict[str, Any] = {}
         if kb_server is not None:
-            mcp_servers["helm-kb"] = kb_server
+            mcp_servers["knowledge"] = kb_server
         if self.valves.ASK_USER:
             ask_server, ask_tool_names = _build_ask_user_mcp_server(event_call)
             mcp_servers["ask-user"] = ask_server
@@ -468,7 +468,7 @@
                 _owui_db_path(self.valves.CHAT_DB_PATH.strip()),
             )
             if chats_server is not None:
-                mcp_servers["hub-chats"] = chats_server
+                mcp_servers["chats"] = chats_server
                 allowed_tools = allowed_tools + chats_tool_names
 
         options_kwargs: Dict[str, Any] = {

@@ -99,6 +99,12 @@ check("results list chat_id and a read_chat hint", "chat_id=c1" in out and "read
 check("archived chats are included and flagged", any(h["id"] == "c2" and h["archived"] for h in hits) and "turns · archived · chat_id=c2" in out, out)
 check("no hits → a helpful line", "No earlier chats match" in mod._format_chat_hits([], "zzz"))
 
+# ---- database backend ----
+check("empty DATABASE_URL is sqlite", mod._db_is_sqlite(""))
+check("sqlite URL is sqlite", mod._db_is_sqlite("sqlite:///data/webui.db"))
+check("postgres URL is not", not mod._db_is_sqlite("postgresql://u:p@db/owui"))
+check("postgres+psycopg URL is not", not mod._db_is_sqlite("postgres+psycopg://u:p@db/owui"))
+
 if fails:
     print(f"\nFAILED: {len(fails)} — " + ", ".join(fails))
     sys.exit(1)
