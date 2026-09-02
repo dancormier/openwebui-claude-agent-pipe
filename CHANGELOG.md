@@ -6,7 +6,7 @@ comments and the homelab PRs that introduced them.
 
 ## Unreleased (2026-09-02)
 
-- Subagent visibility: a `Task` call registers a subagent; its tool calls
+- Subagent visibility: a `Task`/`Agent` call registers a subagent; its tool calls
   show as `↳ <agent> · 🔧 …` in the status line and heartbeat; its result
   closes it with `✅ <agent> · N tools · Ns`; the Done line counts
   subagents. Subagent text deltas no longer stream into the main reply
