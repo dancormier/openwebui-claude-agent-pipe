@@ -6,6 +6,12 @@ comments and the pull requests that introduced them.
 
 ## Unreleased
 
+- A narration beat that follows tool activity now starts with a markdown
+  rule (`---`). The final reply is always such a beat, so the reader can find
+  where it begins instead of scanning one run-on block of progress notes and
+  answer. Consecutive text blocks with no tool call between them still get a
+  plain paragraph break; the pipe cannot know at stream time which beat is the
+  last, so every post-tool beat is ruled.
 - `ask_user` now bounds its wait on the form itself (`timeout_ms` plus a 15s
   grace, via `asyncio.wait_for`) and reports the expiry as `unanswered`. Open
   WebUI's server-side wait defaults to no timeout (`WEBSOCKET_EVENT_CALLER_TIMEOUT`

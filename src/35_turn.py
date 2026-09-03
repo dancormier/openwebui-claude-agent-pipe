@@ -92,6 +92,10 @@ class _TurnState:
         # Whether any assistant text has streamed yet; consecutive text blocks
         # (one narration beat per tool round) get a paragraph break between.
         self.text_emitted = False
+        # Tool calls seen since the last text block started. A text block that
+        # follows tool activity is a new beat — the final reply is always one —
+        # and gets a rule so the reader can find where the reply resumes.
+        self.tools_since_text = 0
         # Running tools keyed by tool_use_id, for the heartbeat status line.
         self.active_tools: Dict[str, Dict[str, Any]] = {}
         # Usage of the latest main-thread API call. Its field sum is the live
@@ -116,6 +120,7 @@ class _TurnState:
         if usage:
             self.last_usage = usage
         self.tool_count += tool_uses
+        self.tools_since_text += tool_uses
 
 
 _Handled = Tuple[List[str], Optional[str]]
@@ -127,6 +132,10 @@ def _thinking_block(text: str) -> str:
         f"{text}\n\n"
         "</details>\n\n"
     )
+
+
+# A markdown rule: the one delimiter both Open WebUI and Conduit render.
+_BEAT_SEPARATOR = "\n\n---\n\n"
 
 
 def _on_stream_event(ev: Dict[str, Any], state: _TurnState, inline_details: bool) -> _Handled:
@@ -141,8 +150,12 @@ def _on_stream_event(ev: Dict[str, Any], state: _TurnState, inline_details: bool
         if block.get("type") == "thinking":
             state.thinking_buffers[ev.get("index", 0)] = ""
             status = "💭 Thinking…"
-        elif block.get("type") == "text" and state.text_emitted:
-            chunks.append("\n\n")
+        elif block.get("type") == "text":
+            if state.text_emitted and state.tools_since_text:
+                chunks.append(_BEAT_SEPARATOR)
+            elif state.text_emitted:
+                chunks.append("\n\n")
+            state.tools_since_text = 0
     elif etype == "content_block_delta":
         delta = ev.get("delta") or {}
         dt = delta.get("type")
