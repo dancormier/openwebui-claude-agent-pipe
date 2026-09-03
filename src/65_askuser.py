@@ -74,8 +74,14 @@ def _build_ask_user_mcp_server(
         if event_call is None:
             result = _no_ui_result(questions)
         else:
+            payload = _user_input_payload(questions, timeout_ms)
             try:
-                output = await event_call(_user_input_payload(questions, timeout_ms))
+                output = await asyncio.wait_for(
+                    event_call(payload), _ask_user_wait_seconds(payload)
+                )
+            except asyncio.TimeoutError:
+                log.warning("ask_user form timed out with no reply")
+                output = {"error": "Event call timed out: the form never answered."}
             except Exception as exc:
                 log.warning("ask_user event_call failed: %s", exc)
                 output = {"error": f"{type(exc).__name__}: {exc}"}
