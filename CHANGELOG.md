@@ -6,6 +6,13 @@ comments and the pull requests that introduced them.
 
 ## Unreleased
 
+- `ask_user` now bounds its wait on the form itself (`timeout_ms` plus a 15s
+  grace, via `asyncio.wait_for`) and reports the expiry as `unanswered`. Open
+  WebUI's server-side wait defaults to no timeout (`WEBSOCKET_EVENT_CALLER_TIMEOUT`
+  unset), and its form sends no cancel when a chat switch or reload unmounts
+  it, so a missed form left the tool call — and the whole turn — hanging
+  forever. The form's default timer also goes from 180s to 240s (Open WebUI's
+  ceiling): the expiry silently discards an answer still being typed.
 - `requirements:` floor raised to `claude-agent-sdk>=0.2.152`. Older SDKs bundle
   a Claude Code CLI (2.1.207 in 0.2.116) that rejects the Fable 5.1 model with
   a 400 and silently falls back to the fallback model; 0.2.152 bundles 2.1.259.

@@ -10,7 +10,13 @@
 _ASK_USER_TOOL = "mcp__ask-user__ask_user"
 _ASK_USER_MAX_QUESTIONS = 4
 _ASK_USER_MAX_OPTIONS = 3
-_ASK_USER_TIMEOUT_MS = 180_000
+_ASK_USER_TIMEOUT_MS = 240_000
+# The form's own timer expiry answers with a cancel; the grace covers the
+# round trip. Open WebUI's server-side wait (WEBSOCKET_EVENT_CALLER_TIMEOUT)
+# is unset by default, which is `timeout=None`: a form unmounted by a chat
+# switch or reload never answers, and without this bound the tool call —
+# and the turn — hang forever (seen 2026-09-03).
+_ASK_USER_TIMEOUT_GRACE_MS = 15_000
 _ASK_USER_UNANSWERED_INSTRUCTION = (
     "The user did not answer. Proceed on your best assumption and say "
     "which one you took."
@@ -111,6 +117,10 @@ def _user_input_payload(
             "timeout_ms": timeout_ms,
         },
     }
+
+
+def _ask_user_wait_seconds(payload: Dict[str, Any]) -> float:
+    return (payload["data"]["timeout_ms"] + _ASK_USER_TIMEOUT_GRACE_MS) / 1000
 
 
 def _answer_text(value: Any) -> str:

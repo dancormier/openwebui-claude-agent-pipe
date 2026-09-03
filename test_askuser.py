@@ -108,6 +108,8 @@ check("payload allow_other true if any question allows it", payload["data"]["all
 check("default timeout inside OWUI's 60-240s window", 60_000 <= payload["data"]["timeout_ms"] <= 240_000)
 check("out-of-range timeout falls back", mod._user_input_payload(norm, 5)["data"]["timeout_ms"] == mod._ASK_USER_TIMEOUT_MS)
 check("in-range timeout kept", mod._user_input_payload(norm, 90_000)["data"]["timeout_ms"] == 90_000)
+check("wait bound is the form timeout plus the grace", mod._ask_user_wait_seconds(mod._user_input_payload(norm, 90_000)) == (90_000 + mod._ASK_USER_TIMEOUT_GRACE_MS) / 1000)
+check("wait bound tracks the fallback timeout", mod._ask_user_wait_seconds(mod._user_input_payload(norm, 5)) == (mod._ASK_USER_TIMEOUT_MS + mod._ASK_USER_TIMEOUT_GRACE_MS) / 1000)
 
 # ---- reply mapping ----
 r = mod._map_user_input_response({"answers": {"q1": "Only auth", "busy": " Retry "}}, norm)
