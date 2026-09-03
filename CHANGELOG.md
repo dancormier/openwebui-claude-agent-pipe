@@ -6,6 +6,14 @@ comments and the pull requests that introduced them.
 
 ## Unreleased
 
+- A new message in a chat now stops the turn still running there before it
+  starts (per-chat in-flight registry, `client.interrupt()`, 30s grace).
+  Conduit and the API let you send mid-turn; the pipe used to start a second
+  agent process on the same session, the two interleaved in one transcript,
+  and an `ask_user` form raised by the abandoned turn lost its answer. The
+  stopped turn ends with "_Stopped: a newer message arrived in this chat._".
+  The new turn's prompt also carries a note that the previous reply was cut
+  short, so the model restates finished work instead of redoing it.
 - Subagents now finish inside the turn: the agent subprocess gets
   `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`, which removes the Agent tool's
   `run_in_background` option. Without it the model launched research agents

@@ -228,19 +228,36 @@
         turn_info: Dict[str, Any] = {}
         emitted_parts: List[str] = []
 
-        # No try/finally around this loop: flushing from a `finally` would mean
-        # yielding during GeneratorExit if the client disconnects mid-stream,
-        # which raises RuntimeError. Dropping a held tail on an aborted stream
-        # is the safe direction — it withholds text rather than emitting it.
-        async for chunk in self._pipe_stream(
-            body, __chat_id__, emitter, __files__, __user__, __metadata__,
-            turn_info=turn_info, event_call=__event_call__,
-        ):
-            safe = redactor.feed(chunk)
-            if safe:
-                if not __chat_id__:
-                    emitted_parts.append(safe)
-                yield safe
+        inflight: Optional[_InflightTurn] = None
+        if __chat_id__:
+            inflight, superseded = await _claim_chat(__chat_id__)
+            if superseded and __event_emitter__ is not None:
+                await __event_emitter__({
+                    "type": "status",
+                    "data": {
+                        "description": "Stopped the turn still running in this chat",
+                        "done": False,
+                    },
+                })
+
+        # The `finally` only releases the in-flight claim — it must never
+        # yield: flushing from there would mean yielding during GeneratorExit
+        # if the client disconnects mid-stream, which raises RuntimeError.
+        # Dropping a held tail on an aborted stream is the safe direction — it
+        # withholds text rather than emitting it.
+        try:
+            async for chunk in self._pipe_stream(
+                body, __chat_id__, emitter, __files__, __user__, __metadata__,
+                turn_info=turn_info, event_call=__event_call__, inflight=inflight,
+            ):
+                safe = redactor.feed(chunk)
+                if safe:
+                    if not __chat_id__:
+                        emitted_parts.append(safe)
+                    yield safe
+        finally:
+            if inflight is not None and __chat_id__:
+                _release_chat(__chat_id__, inflight)
 
         tail = redactor.flush()
         if tail:
@@ -326,6 +343,7 @@
         turn_info: Optional[Dict[str, Any]] = None,
         event_call: Optional[Callable] = None,
         _no_resume: bool = False,
+        inflight: Optional[_InflightTurn] = None,
     ) -> AsyncGenerator[str, None]:
         # Auth selection:
         #   1. If CLAUDE_CODE_OAUTH_TOKEN valve is set → use subscription.
@@ -641,6 +659,10 @@
 
         try:
             async with ClaudeSDKClient(options=options) as client:
+                if inflight is not None:
+                    inflight.interrupt = client.interrupt
+                    if inflight.stopped_previous:
+                        prompt = _with_overlap_note(prompt)
                 await client.query(prompt)
                 async for message in client.receive_response():
                     if isinstance(message, SystemMessage):
@@ -747,7 +769,9 @@
                             (__user__ or {}).get("id"),
                         ):
                             yield chunk
-                        if message.subtype != "success":
+                        if inflight is not None and inflight.superseded:
+                            yield "\n\n_Stopped: a newer message arrived in this chat._\n"
+                        elif message.subtype != "success":
                             yield f"\n\n_Agent stopped: {message.subtype}_\n"
                         # No cost footer: subscription billing makes it noise,
                         # and TTS reads it aloud in call mode.
@@ -787,6 +811,7 @@
                     body, __chat_id__, __event_emitter__, __files__,
                     __user__, __metadata__,
                     turn_info=turn_info, event_call=event_call, _no_resume=True,
+                    inflight=inflight,
                 ):
                     yield chunk
                 return
