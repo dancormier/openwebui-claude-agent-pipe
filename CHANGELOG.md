@@ -6,6 +6,12 @@ comments and the pull requests that introduced them.
 
 ## Unreleased
 
+- Subagents now finish inside the turn: the agent subprocess gets
+  `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`, which removes the Agent tool's
+  `run_in_background` option. Without it the model launched research agents
+  in the background, ended the turn with "I'll report back", and the CLI
+  killed the agent when the pipe disconnected — the chat then stalled until
+  the user prodded it.
 - The /tmp artifact scan is now opt-in (`SCAN_TMP_ARTIFACTS`, default
   off): /tmp is shared by every user of the host, so on a multi-user
   deployment one chat could pick up an image another chat wrote in the same
