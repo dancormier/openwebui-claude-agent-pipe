@@ -471,8 +471,17 @@ def _agent_env(chat_id: Optional[str]) -> Dict[str, str]:
     spawns nested agents must strip the variable (`env -u HUB_CHAT_ID`)
     rather than rely on it being absent, because a child inherits the whole
     environment.
+
+    Background tasks are disabled because a turn is request→response: the
+    Agent tool otherwise offers `run_in_background`, the model picks it, ends
+    the turn with "I'll report back", and the CLI's wind-down on disconnect
+    kills the subagent before it reports. With the flag the parameter leaves
+    the tool schema and every subagent finishes inside the turn.
     """
-    return {"HUB_CHAT_ID": chat_id} if chat_id else {}
+    env = {"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1"}
+    if chat_id:
+        env["HUB_CHAT_ID"] = chat_id
+    return env
 
 
 def _fmt_tokens(n: int) -> str:
@@ -2609,8 +2618,8 @@ class Pipe:
         # told it's inside a sandbox. OpenWebUI's backend runs as UID 0.
         os.environ.setdefault("IS_SANDBOX", "1")
         # HUB_CHAT_ID reaches the agent exactly one way: `_agent_env` putting it
-        # in this client's `ClaudeAgentOptions.env`. `_agent_env` returning `{}`
-        # means "inherit", not "guaranteed unset" — so for a caller with no chat
+        # in this client's `ClaudeAgentOptions.env`. `_agent_env` omitting the
+        # key means "inherit", not "guaranteed unset" — so for a caller with no chat
         # id, an ambient HUB_CHAT_ID in Open WebUI's own environment would flow
         # straight through to the agent, and any tooling that delivers results
         # by chat id would post into someone else's conversation. Clearing it

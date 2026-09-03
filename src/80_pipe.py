@@ -345,8 +345,8 @@
         # told it's inside a sandbox. OpenWebUI's backend runs as UID 0.
         os.environ.setdefault("IS_SANDBOX", "1")
         # HUB_CHAT_ID reaches the agent exactly one way: `_agent_env` putting it
-        # in this client's `ClaudeAgentOptions.env`. `_agent_env` returning `{}`
-        # means "inherit", not "guaranteed unset" — so for a caller with no chat
+        # in this client's `ClaudeAgentOptions.env`. `_agent_env` omitting the
+        # key means "inherit", not "guaranteed unset" — so for a caller with no chat
         # id, an ambient HUB_CHAT_ID in Open WebUI's own environment would flow
         # straight through to the agent, and any tooling that delivers results
         # by chat id would post into someone else's conversation. Clearing it
