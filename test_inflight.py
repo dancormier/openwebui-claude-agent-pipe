@@ -99,6 +99,22 @@ async def finished():
 
 check("done entry is not superseded", asyncio.run(finished()), False)
 
+
+# ---- the winning turn knows it stopped something ----
+async def note_flag():
+    first, _ = await claim("chat-e")
+    first.interrupt = None
+    second, _ = await claim("chat-e", wait_s=0.01)
+    out = (first.stopped_previous, second.stopped_previous)
+    release("chat-e", second)
+    release("chat-e", first)
+    return out
+
+check("stopped_previous set only on the turn that stopped one",
+      asyncio.run(note_flag()), (False, True))
+check("overlap note is appended after the prompt",
+      mod._with_overlap_note("hi").startswith("hi\n\n[Gateway note:"), True)
+
 if failures:
     sys.exit(f"{failures} failure(s)")
 print("ok — in-flight guard tests passed")

@@ -661,6 +661,8 @@
             async with ClaudeSDKClient(options=options) as client:
                 if inflight is not None:
                     inflight.interrupt = client.interrupt
+                    if inflight.stopped_previous:
+                        prompt = _with_overlap_note(prompt)
                 await client.query(prompt)
                 async for message in client.receive_response():
                     if isinstance(message, SystemMessage):

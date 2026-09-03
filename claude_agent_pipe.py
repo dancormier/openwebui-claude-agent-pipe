@@ -1039,6 +1039,75 @@ def _done_line(
         parts.append(ctx)
     return "Done · " + " · ".join(parts) if parts else "Done."
 
+class _InflightTurn:
+    """One running turn in a chat, so a newer message can stop it."""
+
+    def __init__(self) -> None:
+        self.done = asyncio.Event()
+        self.interrupt: Optional[Callable[[], Any]] = None
+        self.superseded = False
+        self.stopped_previous = False
+
+
+# chat_id -> the turn currently running there. Open WebUI's native UI blocks
+# sending while a reply streams, but Conduit and the API do not: without this
+# a second message starts a second agent process on the same session, the two
+# interleave in one transcript, and a form raised by the abandoned turn has no
+# live response to deliver its answer into.
+_inflight: Dict[str, _InflightTurn] = {}
+
+_INFLIGHT_WAIT_S = 30.0
+
+
+async def _claim_chat(
+    chat_id: str, wait_s: float = _INFLIGHT_WAIT_S
+) -> Tuple[_InflightTurn, bool]:
+    """Register the caller as the chat's live turn. A turn already running
+    there is asked to stop and given `wait_s` to exit; the flag says whether
+    one had to be stopped."""
+    prev = _inflight.get(chat_id)
+    superseded = False
+    if prev is not None and not prev.done.is_set():
+        prev.superseded = True
+        superseded = True
+        if prev.interrupt is not None:
+            try:
+                await prev.interrupt()
+            except Exception as exc:
+                logging.getLogger(__name__).warning(
+                    "interrupt of the running turn failed: %s", exc
+                )
+        try:
+            await asyncio.wait_for(prev.done.wait(), wait_s)
+        except asyncio.TimeoutError:
+            logging.getLogger(__name__).warning(
+                "previous turn in chat %s did not exit within %ss", chat_id, wait_s
+            )
+    entry = _InflightTurn()
+    entry.stopped_previous = superseded
+    _inflight[chat_id] = entry
+    return entry, superseded
+
+
+_OVERLAP_NOTE = (
+    "[Gateway note: the previous reply in this chat was still running when "
+    "this message arrived and was stopped. The user may have seen it cut off; "
+    "whatever it finished is in your session history. If it already answers "
+    "what the user is asking now, restate its conclusion briefly instead of "
+    "redoing the work.]"
+)
+
+
+def _with_overlap_note(prompt: str) -> str:
+    return prompt + "\n\n" + _OVERLAP_NOTE
+
+
+def _release_chat(chat_id: str, entry: _InflightTurn) -> None:
+    entry.done.set()
+    if _inflight.get(chat_id) is entry:
+        del _inflight[chat_id]
+
+
 # ---------------------------------------------------------------------------
 # Chat search: the pure half. Open WebUI keeps a chat's messages inside the
 # `chat` JSON column (history.messages keyed by id, or a flat messages list on
@@ -2501,19 +2570,36 @@ class Pipe:
         turn_info: Dict[str, Any] = {}
         emitted_parts: List[str] = []
 
-        # No try/finally around this loop: flushing from a `finally` would mean
-        # yielding during GeneratorExit if the client disconnects mid-stream,
-        # which raises RuntimeError. Dropping a held tail on an aborted stream
-        # is the safe direction — it withholds text rather than emitting it.
-        async for chunk in self._pipe_stream(
-            body, __chat_id__, emitter, __files__, __user__, __metadata__,
-            turn_info=turn_info, event_call=__event_call__,
-        ):
-            safe = redactor.feed(chunk)
-            if safe:
-                if not __chat_id__:
-                    emitted_parts.append(safe)
-                yield safe
+        inflight: Optional[_InflightTurn] = None
+        if __chat_id__:
+            inflight, superseded = await _claim_chat(__chat_id__)
+            if superseded and __event_emitter__ is not None:
+                await __event_emitter__({
+                    "type": "status",
+                    "data": {
+                        "description": "Stopped the turn still running in this chat",
+                        "done": False,
+                    },
+                })
+
+        # The `finally` only releases the in-flight claim — it must never
+        # yield: flushing from there would mean yielding during GeneratorExit
+        # if the client disconnects mid-stream, which raises RuntimeError.
+        # Dropping a held tail on an aborted stream is the safe direction — it
+        # withholds text rather than emitting it.
+        try:
+            async for chunk in self._pipe_stream(
+                body, __chat_id__, emitter, __files__, __user__, __metadata__,
+                turn_info=turn_info, event_call=__event_call__, inflight=inflight,
+            ):
+                safe = redactor.feed(chunk)
+                if safe:
+                    if not __chat_id__:
+                        emitted_parts.append(safe)
+                    yield safe
+        finally:
+            if inflight is not None and __chat_id__:
+                _release_chat(__chat_id__, inflight)
 
         tail = redactor.flush()
         if tail:
@@ -2599,6 +2685,7 @@ class Pipe:
         turn_info: Optional[Dict[str, Any]] = None,
         event_call: Optional[Callable] = None,
         _no_resume: bool = False,
+        inflight: Optional[_InflightTurn] = None,
     ) -> AsyncGenerator[str, None]:
         # Auth selection:
         #   1. If CLAUDE_CODE_OAUTH_TOKEN valve is set → use subscription.
@@ -2914,6 +3001,10 @@ class Pipe:
 
         try:
             async with ClaudeSDKClient(options=options) as client:
+                if inflight is not None:
+                    inflight.interrupt = client.interrupt
+                    if inflight.stopped_previous:
+                        prompt = _with_overlap_note(prompt)
                 await client.query(prompt)
                 async for message in client.receive_response():
                     if isinstance(message, SystemMessage):
@@ -3020,7 +3111,9 @@ class Pipe:
                             (__user__ or {}).get("id"),
                         ):
                             yield chunk
-                        if message.subtype != "success":
+                        if inflight is not None and inflight.superseded:
+                            yield "\n\n_Stopped: a newer message arrived in this chat._\n"
+                        elif message.subtype != "success":
                             yield f"\n\n_Agent stopped: {message.subtype}_\n"
                         # No cost footer: subscription billing makes it noise,
                         # and TTS reads it aloud in call mode.
@@ -3060,6 +3153,7 @@ class Pipe:
                     body, __chat_id__, __event_emitter__, __files__,
                     __user__, __metadata__,
                     turn_info=turn_info, event_call=event_call, _no_resume=True,
+                    inflight=inflight,
                 ):
                     yield chunk
                 return

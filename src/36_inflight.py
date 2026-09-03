@@ -5,6 +5,7 @@ class _InflightTurn:
         self.done = asyncio.Event()
         self.interrupt: Optional[Callable[[], Any]] = None
         self.superseded = False
+        self.stopped_previous = False
 
 
 # chat_id -> the turn currently running there. Open WebUI's native UI blocks
@@ -42,8 +43,22 @@ async def _claim_chat(
                 "previous turn in chat %s did not exit within %ss", chat_id, wait_s
             )
     entry = _InflightTurn()
+    entry.stopped_previous = superseded
     _inflight[chat_id] = entry
     return entry, superseded
+
+
+_OVERLAP_NOTE = (
+    "[Gateway note: the previous reply in this chat was still running when "
+    "this message arrived and was stopped. The user may have seen it cut off; "
+    "whatever it finished is in your session history. If it already answers "
+    "what the user is asking now, restate its conclusion briefly instead of "
+    "redoing the work.]"
+)
+
+
+def _with_overlap_note(prompt: str) -> str:
+    return prompt + "\n\n" + _OVERLAP_NOTE
 
 
 def _release_chat(chat_id: str, entry: _InflightTurn) -> None:
