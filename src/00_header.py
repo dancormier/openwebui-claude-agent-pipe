@@ -4,7 +4,7 @@ description: Run Claude Code's agent loop from inside OpenWebUI chats via the Cl
 author: Thomas Friedel, Dan Cormier
 version: 0.1.0
 license: MIT
-requirements: claude-agent-sdk>=0.2.116
+requirements: claude-agent-sdk>=0.2.152
 """
 
 import asyncio

@@ -53,7 +53,7 @@ repo is where the idea came from.
 ## Requirements
 
 - Open WebUI with the Functions framework; tested on 0.11.3.
-- The Python Open WebUI runs on (3.11 or newer). `claude-agent-sdk` 0.2.116
+- The Python Open WebUI runs on (3.11 or newer). `claude-agent-sdk` 0.2.152
   or newer is installed by Open WebUI from the file's `requirements:` line
   and bundles the Claude Code CLI, so no Node.js and no separate `claude`
   install on the host.
@@ -63,7 +63,7 @@ repo is where the idea came from.
 
 Tested on macOS 15 (native install) and on Linux as root in the official
 `ghcr.io/open-webui/open-webui:main` image, with Open WebUI 0.11.3,
-`claude-agent-sdk` 0.2.116, Claude Code CLI 2.1.258.
+`claude-agent-sdk` 0.2.152, Claude Code CLI 2.1.259.
 
 ## Install
 
@@ -102,7 +102,7 @@ Either way, Open WebUI installs `claude-agent-sdk` from the file's
   succeed. Check the Open WebUI log for the pip error.
 - The host runs with `OFFLINE_MODE=true`: Open WebUI skips the install
   entirely. Install the SDK into Open WebUI's Python environment yourself
-  (`pip install 'claude-agent-sdk>=0.2.116'`) and save again.
+  (`pip install 'claude-agent-sdk>=0.2.152'`) and save again.
 
 ### 3. Set the valves
 

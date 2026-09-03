@@ -6,6 +6,9 @@ comments and the pull requests that introduced them.
 
 ## Unreleased
 
+- `requirements:` floor raised to `claude-agent-sdk>=0.2.152`. Older SDKs bundle
+  a Claude Code CLI (2.1.207 in 0.2.116) that rejects the Fable 5.1 model with
+  a 400 and silently falls back to the fallback model; 0.2.152 bundles 2.1.259.
 - A new message in a chat now stops the turn still running there before it
   starts (per-chat in-flight registry, `client.interrupt()`, 30s grace).
   Conduit and the API let you send mid-turn; the pipe used to start a second
