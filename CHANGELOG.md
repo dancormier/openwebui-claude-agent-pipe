@@ -4,7 +4,7 @@ Patches on top of [tfriedel/openwebui-claude-code](https://github.com/tfriedel/o
 commit `5bbc1fc`, in the order they landed. Numbering matches the pipe's own
 comments and the pull requests that introduced them.
 
-## Unreleased
+## v0.2.0 (2026-09-04)
 
 - The message ⓘ popover now carries more than token counts: the turn's
   `duration` (and `duration_ms`), `num_turns`, and every subscription usage
