@@ -32,7 +32,8 @@ repo is where the idea came from.
 - **Live status** — tool activity, a heartbeat while a tool runs, subagents
   grouped under their parent, and a `Done · 1m42s · 74k/200k (37%) · 12 tools`
   line at the end; the message's ⓘ usage popover also gets the turn's
-  duration and the subscription's session/weekly usage windows.
+  duration and the subscription's usage windows (session, weekly, per-model,
+  extra usage) with the time left until each resets.
 - **`ask_user`** — the agent can pause and ask up to four multiple-choice
   questions through Open WebUI's own form, and get the answers in the same turn.
 - **Earlier chats** — `search_chats` / `read_chat` let the agent look up the

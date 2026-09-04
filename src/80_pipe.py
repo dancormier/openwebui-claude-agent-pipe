@@ -741,11 +741,23 @@
                         continue
 
                     if isinstance(message, RateLimitEvent):
-                        info = message.rate_limit_info
-                        _note_rate_limit(
-                            self._rate_limits, info.rate_limit_type,
-                            info.utilization, info.resets_at,
-                        )
+                        # Older CLIs lack `raw`; the typed fields are the
+                        # representative window and are enough to key on.
+                        try:
+                            info = message.rate_limit_info
+                            raw = getattr(info, "raw", None)
+                            if not isinstance(raw, dict):
+                                raw = {
+                                    "rateLimitType": getattr(info, "rate_limit_type", None),
+                                    "utilization": getattr(info, "utilization", None),
+                                    "resetsAt": getattr(info, "resets_at", None),
+                                }
+                            _note_rate_limit(
+                                self._rate_limits, raw,
+                                _model_short_name(options_kwargs.get("model")),
+                            )
+                        except Exception:
+                            log.warning("rate limit event ignored", exc_info=True)
                         continue
 
                     if isinstance(message, ResultMessage):
