@@ -25,12 +25,12 @@ def _context_tokens(usage: Optional[Dict[str, Any]]) -> int:
 
 
 def _context_status(usage: Optional[Dict[str, Any]], window: int) -> str:
-    """Render 'context 74k/200k (37%)', or '' when unknown/disabled."""
+    """Render '74k/200k (37%)', or '' when unknown/disabled."""
     used = _context_tokens(usage)
     if not used or window <= 0:
         return ""
     pct = round(100 * used / window)
-    return f"context {_fmt_tokens(used)}/{_fmt_tokens(window)} ({pct}%)"
+    return f"{_fmt_tokens(used)}/{_fmt_tokens(window)} ({pct}%)"
 
 
 def _owui_usage(usage: Dict[str, Any]) -> Dict[str, int]:

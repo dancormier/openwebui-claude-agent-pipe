@@ -511,12 +511,12 @@ def _context_tokens(usage: Optional[Dict[str, Any]]) -> int:
 
 
 def _context_status(usage: Optional[Dict[str, Any]], window: int) -> str:
-    """Render 'context 74k/200k (37%)', or '' when unknown/disabled."""
+    """Render '74k/200k (37%)', or '' when unknown/disabled."""
     used = _context_tokens(usage)
     if not used or window <= 0:
         return ""
     pct = round(100 * used / window)
-    return f"context {_fmt_tokens(used)}/{_fmt_tokens(window)} ({pct}%)"
+    return f"{_fmt_tokens(used)}/{_fmt_tokens(window)} ({pct}%)"
 
 
 def _owui_usage(usage: Dict[str, Any]) -> Dict[str, int]:
@@ -1045,21 +1045,23 @@ def _context_from_usage(cu: Dict[str, Any]) -> str:
     if not (used and window):
         return ""
     pct = round(100 * used / window)
-    return f"context {_fmt_tokens(used)}/{_fmt_tokens(window)} ({pct}%)"
+    return f"{_fmt_tokens(used)}/{_fmt_tokens(window)} ({pct}%)"
 
 
 def _done_line(
     duration_ms: Optional[int], tool_count: int, ctx: str, agents: int = 0
 ) -> str:
+    # Conduit truncates long status lines from the right, so the figures
+    # worth glancing at (time, context) come before the tool tallies.
     parts: List[str] = []
     if duration_ms:
         parts.append(_fmt_duration(duration_ms))
+    if ctx:
+        parts.append(ctx)
     if tool_count:
         parts.append(f"{tool_count} tool{'s' if tool_count != 1 else ''}")
     if agents:
         parts.append(f"{agents} subagent{'s' if agents != 1 else ''}")
-    if ctx:
-        parts.append(ctx)
     return "Done · " + " · ".join(parts) if parts else "Done."
 
 class _InflightTurn:
@@ -2480,7 +2482,7 @@ class Pipe:
             default=200_000,
             description=(
                 "FALLBACK context window (tokens) for the post-turn "
-                "'Done · context X/Y (N%)' status line, used only when the "
+                "'Done · X/Y (N%)' status line, used only when the "
                 "SDK's live context query fails (which otherwise supplies the "
                 "real per-model window). 0 disables the fallback suffix."
             ),

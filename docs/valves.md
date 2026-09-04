@@ -21,7 +21,7 @@ not per user.
 | `SESSION_SEARCH` | bool | `True` | Register search_chats / read_chat: the agent can look up the calling user's earlier chats in this Open WebUI (read-only sqlite over the chat table, scoped to that user). Only sqlite deployments; leave on elsewhere, the tools then report themselves unavailable. |
 | `CHAT_DB_PATH` | str | *(empty)* | Path to Open WebUI's webui.db for SESSION_SEARCH. Empty resolves DATA_DIR/webui.db from the running Open WebUI. |
 | `MAX_TURNS` | int | `30` | Maximum agent turns per user message. 0 disables the cap. |
-| `CONTEXT_WINDOW_TOKENS` | int | `200000` | FALLBACK context window (tokens) for the post-turn 'Done · context X/Y (N%)' status line, used only when the SDK's live context query fails (which otherwise supplies the real per-model window). 0 disables the fallback suffix. |
+| `CONTEXT_WINDOW_TOKENS` | int | `200000` | FALLBACK context window (tokens) for the post-turn 'Done · X/Y (N%)' status line, used only when the SDK's live context query fails (which otherwise supplies the real per-model window). 0 disables the fallback suffix. |
 | `EFFORT` | str | *(empty)* | Default effort level for agent turns: low\|medium\|high\|xhigh\|max. Empty = SDK default (high). A message starting with '/effort <level>' overrides it for that turn. |
 | `TASK_BUDGET_TOKENS` | int | `0` | Per-turn token budget the model is made aware of and paces itself against (output_config.task_budget). API minimum is 20000 — smaller nonzero values are ignored. 0 disables. |
 | `FALLBACK_MODEL` | str | *(empty)* | Model to retry with if the primary model fails or is unavailable (SDK fallback_model). Empty disables. |

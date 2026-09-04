@@ -109,7 +109,7 @@
             default=200_000,
             description=(
                 "FALLBACK context window (tokens) for the post-turn "
-                "'Done · context X/Y (N%)' status line, used only when the "
+                "'Done · X/Y (N%)' status line, used only when the "
                 "SDK's live context query fails (which otherwise supplies the "
                 "real per-model window). 0 disables the fallback suffix."
             ),

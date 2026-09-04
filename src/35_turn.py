@@ -289,20 +289,22 @@ def _context_from_usage(cu: Dict[str, Any]) -> str:
     if not (used and window):
         return ""
     pct = round(100 * used / window)
-    return f"context {_fmt_tokens(used)}/{_fmt_tokens(window)} ({pct}%)"
+    return f"{_fmt_tokens(used)}/{_fmt_tokens(window)} ({pct}%)"
 
 
 def _done_line(
     duration_ms: Optional[int], tool_count: int, ctx: str, agents: int = 0
 ) -> str:
+    # Conduit truncates long status lines from the right, so the figures
+    # worth glancing at (time, context) come before the tool tallies.
     parts: List[str] = []
     if duration_ms:
         parts.append(_fmt_duration(duration_ms))
+    if ctx:
+        parts.append(ctx)
     if tool_count:
         parts.append(f"{tool_count} tool{'s' if tool_count != 1 else ''}")
     if agents:
         parts.append(f"{agents} subagent{'s' if agents != 1 else ''}")
-    if ctx:
-        parts.append(ctx)
     return "Done · " + " · ".join(parts) if parts else "Done."
 

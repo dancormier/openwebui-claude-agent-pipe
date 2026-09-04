@@ -65,7 +65,7 @@ check("ctx null field", ctx_tokens({"input_tokens": None, "output_tokens": 5}), 
 check(
     "status basic",
     ctx_status({"input_tokens": 74_000, "output_tokens": 0}, 200_000),
-    "context 74k/200k (37%)",
+    "74k/200k (37%)",
 )
 check("status no usage", ctx_status(None, 200_000), "")
 check("status zero usage", ctx_status({}, 200_000), "")
@@ -73,7 +73,7 @@ check("status disabled", ctx_status(USAGE, 0), "")
 check(
     "status over window still renders",
     ctx_status({"input_tokens": 300_000}, 200_000),
-    "context 300k/200k (150%)",
+    "300k/200k (150%)",
 )
 
 check(

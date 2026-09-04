@@ -30,7 +30,7 @@ repo is where the idea came from.
 - **Keyless clients** — OpenAI-API callers that send no chat id (mobile apps,
   voice) get a session too, fingerprinted from the conversation prefix.
 - **Live status** — tool activity, a heartbeat while a tool runs, subagents
-  grouped under their parent, and a `Done · 1m42s · 12 tools · context 74k/200k`
+  grouped under their parent, and a `Done · 1m42s · 74k/200k (37%) · 12 tools`
   line at the end (also written to the message's ⓘ usage popover).
 - **`ask_user`** — the agent can pause and ask up to four multiple-choice
   questions through Open WebUI's own form, and get the answers in the same turn.
