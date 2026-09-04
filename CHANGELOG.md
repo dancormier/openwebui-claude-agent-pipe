@@ -7,14 +7,17 @@ comments and the pull requests that introduced them.
 ## Unreleased
 
 - The message ⓘ popover now carries more than token counts: the turn's
-  `duration` (and `duration_ms`), `num_turns`, and the subscription's usage
-  windows as the CLI last reported them — `session_used`/`session_resets`
-  for the five-hour window, `weekly_used`/`weekly_resets` for the seven-day
-  one, `<model>_used`/`<model>_resets` for per-model windows. Used is a
-  percent, resets is a local time (`16:00`, or `Sat 16:00` when not today).
-  The CLI only sends a `RateLimitEvent` when a window changes state, so the
-  latest one per window is cached for the life of the process and the keys
-  are simply absent until the first event arrives.
+  `duration` (and `duration_ms`), `num_turns`, and every subscription usage
+  window the CLI last reported — `session_used`/`session_resets_in` for the
+  five-hour window, `weekly_used`/`weekly_resets_in` for the seven-day one,
+  `<model>_used`/`<model>_resets_in` for the turn model's own weekly window
+  (`fable_used`, `opus_used`, …), and `extra_usage_used`/`extra_usage_resets_in`
+  (plus `extra_usage_in_use: true` while it is being drawn on) for
+  pay-as-you-go overage. Used is a percent, resets_in is time left
+  (`1d 2h 4m`, `14m`, `<1m`). The CLI only sends a `RateLimitEvent` when a
+  window changes state, so the latest figure per window is cached for the
+  life of the process and the keys are simply absent until the first event
+  arrives.
 - The end-of-turn status line now reads `Done · 1m20s · 74k/200k (37%) ·
   3 tools · 2 subagents`: elapsed time and the context figure (no longer
   prefixed with "context") come before the tool tallies, because Conduit

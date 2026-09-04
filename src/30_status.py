@@ -73,40 +73,73 @@ def _fmt_duration(ms: int) -> str:
     return f"{s // 3600}h{(s % 3600) // 60:02d}m"
 
 
-_RATE_LIMIT_KEYS = {"five_hour": "session", "seven_day": "weekly"}
+_RATE_LIMIT_KEYS = {"five_hour": "session", "seven_day": "weekly", "overage": "extra_usage"}
 
 
-def _rate_limit_key(rate_limit_type: str) -> str:
-    """Popover-friendly name for an SDK rate_limit_type: the session and
-    weekly windows get plain words, model windows (seven_day_opus) keep just
-    the model, anything unrecognised passes through as-is."""
-    if rate_limit_type in _RATE_LIMIT_KEYS:
-        return _RATE_LIMIT_KEYS[rate_limit_type]
-    if rate_limit_type.startswith("seven_day_"):
-        return rate_limit_type[len("seven_day_"):]
-    return rate_limit_type
+def _model_short_name(model_id: Optional[str]) -> str:
+    """`claude-fable-5-1` → `fable`: the family name is what the usage widget
+    labels a model window with, and the version digits would only churn the
+    popover key between releases."""
+    parts = (model_id or "").strip().split("-")
+    if len(parts) >= 2 and parts[0] == "claude" and parts[1]:
+        return parts[1]
+    return "model"
 
 
-def _fmt_reset(ts: int, now: Optional[float] = None) -> str:
-    """Local wall-clock of a reset, with the weekday only when it is not today."""
+def _fmt_resets_in(resets_at: int, now: Optional[float] = None) -> str:
     now = time.time() if now is None else now
-    at, today = time.localtime(ts), time.localtime(now)
-    if at[:3] == today[:3]:
-        return time.strftime("%H:%M", at)
-    return time.strftime("%a %H:%M", at)
+    left = int(resets_at - now)
+    if left < 60:
+        return "<1m"
+    d, rem = divmod(left, 86400)
+    h, rem = divmod(rem, 3600)
+    m = rem // 60
+    return " ".join(f"{n}{unit}" for n, unit in ((d, "d"), (h, "h"), (m, "m")) if n)
 
 
 def _note_rate_limit(
     cache: Dict[str, Dict[str, Any]],
-    rate_limit_type: Optional[str],
-    utilization: Optional[float],
-    resets_at: Optional[int],
+    raw: Optional[Dict[str, Any]],
+    model_key: str = "model",
 ) -> None:
-    """The CLI sends a RateLimitEvent only when a window's state changes, so
-    the latest one per type is kept for every later turn in this process."""
-    if not rate_limit_type:
+    """Fold one rate_limit_event into the cache, keyed by popover name. The
+    CLI sends the event only when a window's state changes, so the latest per
+    window is kept for every later turn in this process. `unifiedWindows`
+    carries the session and weekly windows on every event; the top-level
+    fields are the window the CLI considers representative, which for a
+    `seven_day_<model>` type is the model's own weekly window — the event
+    does not name the model, so the caller passes the turn's."""
+    if not isinstance(raw, dict):
         return
-    cache[rate_limit_type] = {"utilization": utilization, "resets_at": resets_at}
+    windows = raw.get("unifiedWindows")
+    if isinstance(windows, dict):
+        for rl_type, key in (("five_hour", "session"), ("seven_day", "weekly")):
+            w = windows.get(rl_type)
+            if isinstance(w, dict):
+                cache[key] = {"utilization": w.get("utilization"), "resets_at": w.get("resetsAt")}
+    rl_type = raw.get("rateLimitType")
+    if isinstance(rl_type, str) and rl_type:
+        if rl_type in _RATE_LIMIT_KEYS:
+            key = _RATE_LIMIT_KEYS[rl_type]
+        elif rl_type.startswith("seven_day_"):
+            key = model_key
+        else:
+            key = rl_type
+        # The top level can name a window without repeating its figures (a
+        # five_hour claim with only resetsAt); never blank what unifiedWindows
+        # just filled in.
+        top = {
+            k: v for k, v in (
+                ("utilization", raw.get("utilization")),
+                ("resets_at", raw.get("resetsAt")),
+            ) if v is not None
+        }
+        if top:
+            cache.setdefault(key, {}).update(top)
+    if raw.get("isUsingOverage") is True:
+        cache.setdefault("extra_usage", {})["in_use"] = True
+    elif "extra_usage" in cache:
+        cache["extra_usage"].pop("in_use", None)
 
 
 def _usage_limits(
@@ -114,17 +147,24 @@ def _usage_limits(
 ) -> Dict[str, Any]:
     now = time.time() if now is None else now
     out: Dict[str, Any] = {}
-    for rl_type, info in list(cache.items()):
+    for key, info in list(cache.items()):
         # A window past its reset has no fresh event behind it yet; showing
         # the old figure would be wrong, so say nothing until the CLI does.
         if info.get("resets_at") and int(info["resets_at"]) < now:
-            del cache[rl_type]
+            del cache[key]
+    ordered = ["session", "weekly"]
+    ordered += [k for k in cache if k not in ("session", "weekly", "extra_usage")]
+    ordered.append("extra_usage")
+    for key in ordered:
+        info = cache.get(key)
+        if not info:
             continue
-        key = _rate_limit_key(rl_type)
         if info.get("utilization") is not None:
             out[f"{key}_used"] = round(100 * float(info["utilization"]))
         if info.get("resets_at"):
-            out[f"{key}_resets"] = _fmt_reset(int(info["resets_at"]), now)
+            out[f"{key}_resets_in"] = _fmt_resets_in(int(info["resets_at"]), now)
+        if info.get("in_use"):
+            out[f"{key}_in_use"] = True
     return out
 
 
