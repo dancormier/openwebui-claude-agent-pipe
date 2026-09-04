@@ -112,7 +112,9 @@ check("resets_in skips a zero middle unit", mod._fmt_resets_in(NOW + 86400 + 4 *
 
 check("model short name: fable", mod._model_short_name("claude-fable-5-1"), "fable")
 check("model short name: haiku", mod._model_short_name("claude-haiku-4-5-20260101"), "haiku")
-check("model short name: unknown id", mod._model_short_name("gpt-5"), "model")
+check("model short name: bare alias keeps its own key", mod._model_short_name("opus"), "opus")
+check("model short name: alias sanitised", mod._model_short_name("My.Model-2"), "mymodel2")
+check("model short name: unknown id", mod._model_short_name("gpt-5"), "gpt5")
 check("model short name: empty", mod._model_short_name(None), "model")
 
 HAIKU_EVENT = {
@@ -160,6 +162,10 @@ check(
         "extra_usage_used", "extra_usage_resets_in", "extra_usage_in_use",
     ],
 )
+mod._note_rate_limit(cache, {"rateLimitType": "seven_day", "unifiedWindows": {"five_hour": {"resetsAt": IN_4H}}}, "fable")
+check("unified window with only resetsAt keeps known utilization", mod._usage_limits(cache, NOW)["session_used"], 60)
+mod._note_rate_limit(cache, {"rateLimitType": "five_hour", "utilization": 0.6, "resetsAt": IN_4H}, "fable")
+check("in_use kept when isUsingOverage absent", mod._usage_limits(cache, NOW)["extra_usage_in_use"], True)
 mod._note_rate_limit(cache, {"rateLimitType": "five_hour", "utilization": 0.6, "resetsAt": IN_4H, "isUsingOverage": False}, "fable")
 check("in_use cleared when overage stops", "extra_usage_in_use" in mod._usage_limits(cache, NOW), False)
 mod._note_rate_limit(cache, {"rateLimitType": "overage", "utilization": 0.9, "resetsAt": NOW - 60}, "fable")

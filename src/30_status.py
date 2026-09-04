@@ -83,7 +83,10 @@ def _model_short_name(model_id: Optional[str]) -> str:
     parts = (model_id or "").strip().split("-")
     if len(parts) >= 2 and parts[0] == "claude" and parts[1]:
         return parts[1]
-    return "model"
+    # A bare alias (`opus`) must keep its own key, or two aliased models
+    # would overwrite each other's numbers under one shared name.
+    alias = re.sub(r"[^a-z0-9]+", "", (model_id or "").lower())
+    return alias or "model"
 
 
 def _fmt_resets_in(resets_at: int, now: Optional[float] = None) -> str:
@@ -116,7 +119,7 @@ def _note_rate_limit(
         for rl_type, key in (("five_hour", "session"), ("seven_day", "weekly")):
             w = windows.get(rl_type)
             if isinstance(w, dict):
-                cache[key] = {"utilization": w.get("utilization"), "resets_at": w.get("resetsAt")}
+                _merge_window(cache, key, w.get("utilization"), w.get("resetsAt"))
     rl_type = raw.get("rateLimitType")
     if isinstance(rl_type, str) and rl_type:
         if rl_type in _RATE_LIMIT_KEYS:
@@ -128,18 +131,26 @@ def _note_rate_limit(
         # The top level can name a window without repeating its figures (a
         # five_hour claim with only resetsAt); never blank what unifiedWindows
         # just filled in.
-        top = {
-            k: v for k, v in (
-                ("utilization", raw.get("utilization")),
-                ("resets_at", raw.get("resetsAt")),
-            ) if v is not None
-        }
-        if top:
-            cache.setdefault(key, {}).update(top)
+        _merge_window(cache, key, raw.get("utilization"), raw.get("resetsAt"))
     if raw.get("isUsingOverage") is True:
         cache.setdefault("extra_usage", {})["in_use"] = True
-    elif "extra_usage" in cache:
+    elif raw.get("isUsingOverage") is False and "extra_usage" in cache:
         cache["extra_usage"].pop("in_use", None)
+
+
+def _merge_window(
+    cache: Dict[str, Dict[str, Any]], key: str,
+    utilization: Any, resets_at: Any,
+) -> None:
+    """Only overwrite with figures the event actually carries: a window
+    claim can name itself with just resetsAt and must not blank a known
+    utilization."""
+    fresh = {
+        k: v for k, v in (("utilization", utilization), ("resets_at", resets_at))
+        if v is not None
+    }
+    if fresh:
+        cache.setdefault(key, {}).update(fresh)
 
 
 def _usage_limits(

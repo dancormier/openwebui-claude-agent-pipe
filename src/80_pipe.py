@@ -757,7 +757,7 @@
                                 _model_short_name(options_kwargs.get("model")),
                             )
                         except Exception:
-                            log.debug("rate limit event ignored", exc_info=True)
+                            log.warning("rate limit event ignored", exc_info=True)
                         continue
 
                     if isinstance(message, ResultMessage):
