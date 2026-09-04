@@ -190,6 +190,9 @@
 
     def __init__(self) -> None:
         self.valves = self.Valves()
+        # Latest RateLimitInfo per window type; the CLI only reports changes,
+        # so this is what later turns' usage popovers read from.
+        self._rate_limits: Dict[str, Dict[str, Any]] = {}
 
     def pipes(self) -> List[Dict[str, str]]:
         entries = [{"id": "claude-code", "name": "Claude Code"}]
@@ -299,7 +302,7 @@
 
     async def _record_usage(
         self,
-        usage_payload: Dict[str, int],
+        usage_payload: Dict[str, Any],
         __event_emitter__: Optional[Callable],
         __metadata__: Optional[Dict[str, Any]],
     ) -> None:
@@ -737,6 +740,14 @@
                                 yield chunk
                         continue
 
+                    if isinstance(message, RateLimitEvent):
+                        info = message.rate_limit_info
+                        _note_rate_limit(
+                            self._rate_limits, info.rate_limit_type,
+                            info.utilization, info.resets_at,
+                        )
+                        continue
+
                     if isinstance(message, ResultMessage):
                         ctx = ""
                         try:
@@ -759,7 +770,12 @@
                         )
                         if state.last_usage:
                             await self._record_usage(
-                                _owui_usage(state.last_usage),
+                                _owui_usage(
+                                    state.last_usage,
+                                    message.duration_ms,
+                                    getattr(message, "num_turns", None),
+                                    _usage_limits(self._rate_limits),
+                                ),
                                 __event_emitter__,
                                 __metadata__,
                             )

@@ -99,6 +99,62 @@ check(
     },
 )
 
+import time
+
+NOW = time.mktime((2026, 9, 4, 12, 0, 0, 0, 0, -1))
+IN_4H = NOW + 4 * 3600
+IN_3D = NOW + 3 * 86400
+check("reset today → time only", mod._fmt_reset(IN_4H, NOW), time.strftime("%H:%M", time.localtime(IN_4H)))
+check("reset another day → weekday + time", mod._fmt_reset(IN_3D, NOW), time.strftime("%a %H:%M", time.localtime(IN_3D)))
+check("reset crosses midnight → weekday", mod._fmt_reset(NOW + 13 * 3600, NOW), time.strftime("%a %H:%M", time.localtime(NOW + 13 * 3600)))
+
+check("rate limit key: five_hour", mod._rate_limit_key("five_hour"), "session")
+check("rate limit key: seven_day", mod._rate_limit_key("seven_day"), "weekly")
+check("rate limit key: model window", mod._rate_limit_key("seven_day_opus"), "opus")
+check("rate limit key: unknown passes through", mod._rate_limit_key("overage"), "overage")
+
+cache = {}
+check("no limits → empty", mod._usage_limits(cache, NOW), {})
+mod._note_rate_limit(cache, "five_hour", 0.37, IN_4H)
+mod._note_rate_limit(cache, "seven_day", 0.128, IN_3D)
+mod._note_rate_limit(cache, None, 0.5, IN_4H)
+check(
+    "limits from cache",
+    mod._usage_limits(cache, NOW),
+    {
+        "session_used": 37,
+        "session_resets": time.strftime("%H:%M", time.localtime(IN_4H)),
+        "weekly_used": 13,
+        "weekly_resets": time.strftime("%a %H:%M", time.localtime(IN_3D)),
+    },
+)
+mod._note_rate_limit(cache, "five_hour", 0.6, IN_4H)
+mod._note_rate_limit(cache, "seven_day_opus", 0.05, None)
+later = mod._usage_limits(cache, NOW)
+check("later turn: latest per type, others kept", later["session_used"], 60)
+check("later turn: weekly survives", later["weekly_used"], 13)
+check("later turn: model window without reset", (later["opus_used"], "opus_resets" in later), (5, False))
+
+full = owui_usage(USAGE, 80_000, 4, {"session_used": 37, "session_resets": "16:00"})
+check(
+    "owui usage with turn data",
+    full,
+    {
+        "prompt_tokens": 2 + 476 + 62028,
+        "completion_tokens": 825,
+        "total_tokens": 2 + 476 + 62028 + 825,
+        "cache_read_input_tokens": 62028,
+        "cache_creation_input_tokens": 476,
+        "duration": "1m20s",
+        "duration_ms": 80_000,
+        "num_turns": 4,
+        "session_used": 37,
+        "session_resets": "16:00",
+    },
+)
+check("owui usage keeps token keys first", list(full)[:5], ["prompt_tokens", "completion_tokens", "total_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"])
+check("owui usage omits absent turn data", set(owui_usage(USAGE, None, None, {})) & {"duration", "duration_ms", "num_turns"}, set())
+
 check("dur seconds", fmt_dur(4_200), "4s")
 check("dur minutes", fmt_dur(102_000), "1m42s")
 check("dur hours", fmt_dur(3_725_000), "1h02m")

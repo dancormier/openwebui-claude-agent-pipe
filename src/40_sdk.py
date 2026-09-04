@@ -3,6 +3,7 @@ from claude_agent_sdk import (
     ClaudeAgentOptions,
     ClaudeSDKClient,
     CLIJSONDecodeError,
+    RateLimitEvent,
     ResultMessage,
     StreamEvent,
     SystemMessage,
