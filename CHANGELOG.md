@@ -6,6 +6,20 @@ comments and the pull requests that introduced them.
 
 ## Unreleased
 
+- The message ⓘ popover now carries more than token counts: the turn's
+  `duration` (and `duration_ms`), `num_turns`, and the subscription's usage
+  windows as the CLI last reported them — `session_used`/`session_resets`
+  for the five-hour window, `weekly_used`/`weekly_resets` for the seven-day
+  one, `<model>_used`/`<model>_resets` for per-model windows. Used is a
+  percent, resets is a local time (`16:00`, or `Sat 16:00` when not today).
+  The CLI only sends a `RateLimitEvent` when a window changes state, so the
+  latest one per window is cached for the life of the process and the keys
+  are simply absent until the first event arrives.
+- The end-of-turn status line now reads `Done · 1m20s · 74k/200k (37%) ·
+  3 tools · 2 subagents`: elapsed time and the context figure (no longer
+  prefixed with "context") come before the tool tallies, because Conduit
+  truncates the line from the right and was cutting off the part worth
+  reading.
 - A narration beat that follows tool activity now starts with a markdown
   rule (`---`). The final reply is always such a beat, so the reader can find
   where it begins instead of scanning one run-on block of progress notes and

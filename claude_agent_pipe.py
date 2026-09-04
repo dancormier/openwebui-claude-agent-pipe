@@ -511,19 +511,25 @@ def _context_tokens(usage: Optional[Dict[str, Any]]) -> int:
 
 
 def _context_status(usage: Optional[Dict[str, Any]], window: int) -> str:
-    """Render 'context 74k/200k (37%)', or '' when unknown/disabled."""
+    """Render '74k/200k (37%)', or '' when unknown/disabled."""
     used = _context_tokens(usage)
     if not used or window <= 0:
         return ""
     pct = round(100 * used / window)
-    return f"context {_fmt_tokens(used)}/{_fmt_tokens(window)} ({pct}%)"
+    return f"{_fmt_tokens(used)}/{_fmt_tokens(window)} ({pct}%)"
 
 
-def _owui_usage(usage: Dict[str, Any]) -> Dict[str, int]:
-    """OWUI-normalized usage dict from one API call's usage block."""
+def _owui_usage(
+    usage: Dict[str, Any],
+    duration_ms: Optional[int] = None,
+    num_turns: Optional[int] = None,
+    limits: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """OWUI-normalized usage dict from one API call's usage block. The token
+    keys stay first: the ⓘ popover dumps the dict in insertion order."""
     out_tok = int(usage.get("output_tokens") or 0)
     total = _context_tokens(usage)
-    return {
+    out: Dict[str, Any] = {
         "prompt_tokens": total - out_tok,
         "completion_tokens": out_tok,
         "total_tokens": total,
@@ -534,6 +540,14 @@ def _owui_usage(usage: Dict[str, Any]) -> Dict[str, int]:
             usage.get("cache_creation_input_tokens") or 0
         ),
     }
+    if duration_ms:
+        out["duration"] = _fmt_duration(duration_ms)
+        out["duration_ms"] = int(duration_ms)
+    if num_turns is not None:
+        out["num_turns"] = int(num_turns)
+    if limits:
+        out.update(limits)
+    return out
 
 
 def _fmt_duration(ms: int) -> str:
@@ -543,6 +557,61 @@ def _fmt_duration(ms: int) -> str:
     if s < 3600:
         return f"{s // 60}m{s % 60:02d}s"
     return f"{s // 3600}h{(s % 3600) // 60:02d}m"
+
+
+_RATE_LIMIT_KEYS = {"five_hour": "session", "seven_day": "weekly"}
+
+
+def _rate_limit_key(rate_limit_type: str) -> str:
+    """Popover-friendly name for an SDK rate_limit_type: the session and
+    weekly windows get plain words, model windows (seven_day_opus) keep just
+    the model, anything unrecognised passes through as-is."""
+    if rate_limit_type in _RATE_LIMIT_KEYS:
+        return _RATE_LIMIT_KEYS[rate_limit_type]
+    if rate_limit_type.startswith("seven_day_"):
+        return rate_limit_type[len("seven_day_"):]
+    return rate_limit_type
+
+
+def _fmt_reset(ts: int, now: Optional[float] = None) -> str:
+    """Local wall-clock of a reset, with the weekday only when it is not today."""
+    now = time.time() if now is None else now
+    at, today = time.localtime(ts), time.localtime(now)
+    if at[:3] == today[:3]:
+        return time.strftime("%H:%M", at)
+    return time.strftime("%a %H:%M", at)
+
+
+def _note_rate_limit(
+    cache: Dict[str, Dict[str, Any]],
+    rate_limit_type: Optional[str],
+    utilization: Optional[float],
+    resets_at: Optional[int],
+) -> None:
+    """The CLI sends a RateLimitEvent only when a window's state changes, so
+    the latest one per type is kept for every later turn in this process."""
+    if not rate_limit_type:
+        return
+    cache[rate_limit_type] = {"utilization": utilization, "resets_at": resets_at}
+
+
+def _usage_limits(
+    cache: Dict[str, Dict[str, Any]], now: Optional[float] = None
+) -> Dict[str, Any]:
+    now = time.time() if now is None else now
+    out: Dict[str, Any] = {}
+    for rl_type, info in list(cache.items()):
+        # A window past its reset has no fresh event behind it yet; showing
+        # the old figure would be wrong, so say nothing until the CLI does.
+        if info.get("resets_at") and int(info["resets_at"]) < now:
+            del cache[rl_type]
+            continue
+        key = _rate_limit_key(rl_type)
+        if info.get("utilization") is not None:
+            out[f"{key}_used"] = round(100 * float(info["utilization"]))
+        if info.get("resets_at"):
+            out[f"{key}_resets"] = _fmt_reset(int(info["resets_at"]), now)
+    return out
 
 
 _EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
@@ -1045,21 +1114,23 @@ def _context_from_usage(cu: Dict[str, Any]) -> str:
     if not (used and window):
         return ""
     pct = round(100 * used / window)
-    return f"context {_fmt_tokens(used)}/{_fmt_tokens(window)} ({pct}%)"
+    return f"{_fmt_tokens(used)}/{_fmt_tokens(window)} ({pct}%)"
 
 
 def _done_line(
     duration_ms: Optional[int], tool_count: int, ctx: str, agents: int = 0
 ) -> str:
+    # Conduit truncates long status lines from the right, so the figures
+    # worth glancing at (time, context) come before the tool tallies.
     parts: List[str] = []
     if duration_ms:
         parts.append(_fmt_duration(duration_ms))
+    if ctx:
+        parts.append(ctx)
     if tool_count:
         parts.append(f"{tool_count} tool{'s' if tool_count != 1 else ''}")
     if agents:
         parts.append(f"{agents} subagent{'s' if agents != 1 else ''}")
-    if ctx:
-        parts.append(ctx)
     return "Done · " + " · ".join(parts) if parts else "Done."
 
 class _InflightTurn:
@@ -1292,6 +1363,7 @@ from claude_agent_sdk import (
     ClaudeAgentOptions,
     ClaudeSDKClient,
     CLIJSONDecodeError,
+    RateLimitEvent,
     ResultMessage,
     StreamEvent,
     SystemMessage,
@@ -2480,7 +2552,7 @@ class Pipe:
             default=200_000,
             description=(
                 "FALLBACK context window (tokens) for the post-turn "
-                "'Done · context X/Y (N%)' status line, used only when the "
+                "'Done · X/Y (N%)' status line, used only when the "
                 "SDK's live context query fails (which otherwise supplies the "
                 "real per-model window). 0 disables the fallback suffix."
             ),
@@ -2561,6 +2633,9 @@ class Pipe:
 
     def __init__(self) -> None:
         self.valves = self.Valves()
+        # Latest RateLimitInfo per window type; the CLI only reports changes,
+        # so this is what later turns' usage popovers read from.
+        self._rate_limits: Dict[str, Dict[str, Any]] = {}
 
     def pipes(self) -> List[Dict[str, str]]:
         entries = [{"id": "claude-code", "name": "Claude Code"}]
@@ -2670,7 +2745,7 @@ class Pipe:
 
     async def _record_usage(
         self,
-        usage_payload: Dict[str, int],
+        usage_payload: Dict[str, Any],
         __event_emitter__: Optional[Callable],
         __metadata__: Optional[Dict[str, Any]],
     ) -> None:
@@ -3108,6 +3183,14 @@ class Pipe:
                                 yield chunk
                         continue
 
+                    if isinstance(message, RateLimitEvent):
+                        info = message.rate_limit_info
+                        _note_rate_limit(
+                            self._rate_limits, info.rate_limit_type,
+                            info.utilization, info.resets_at,
+                        )
+                        continue
+
                     if isinstance(message, ResultMessage):
                         ctx = ""
                         try:
@@ -3130,7 +3213,12 @@ class Pipe:
                         )
                         if state.last_usage:
                             await self._record_usage(
-                                _owui_usage(state.last_usage),
+                                _owui_usage(
+                                    state.last_usage,
+                                    message.duration_ms,
+                                    getattr(message, "num_turns", None),
+                                    _usage_limits(self._rate_limits),
+                                ),
                                 __event_emitter__,
                                 __metadata__,
                             )

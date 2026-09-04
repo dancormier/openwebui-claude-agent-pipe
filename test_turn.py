@@ -141,9 +141,11 @@ check("session status: history present → cold start", mod._session_status(Fals
 check("session status: empty history → new chat", mod._session_status(False, []) == "Session: new chat")
 
 # ---- context + done line ----
-check("context from usage", mod._context_from_usage({"totalTokens": 396000, "rawMaxTokens": 1000000}) == "context 396k/1M (40%)", mod._context_from_usage({"totalTokens": 396000, "rawMaxTokens": 1000000}))
+check("context from usage", mod._context_from_usage({"totalTokens": 396000, "rawMaxTokens": 1000000}) == "396k/1M (40%)", mod._context_from_usage({"totalTokens": 396000, "rawMaxTokens": 1000000}))
 check("context from usage: missing window → empty", mod._context_from_usage({"totalTokens": 5}) == "")
-check("done line: all parts", mod._done_line(102000, 12, "context 1k/2k (50%)") == "Done · 1m42s · 12 tools · context 1k/2k (50%)", mod._done_line(102000, 12, "context 1k/2k (50%)"))
+check("done line: context before tools", mod._done_line(102000, 12, "1k/2k (50%)") == "Done · 1m42s · 1k/2k (50%) · 12 tools", mod._done_line(102000, 12, "1k/2k (50%)"))
+check("done line: all parts in order", mod._done_line(80000, 3, "74k/200k (37%)", 2) == "Done · 1m20s · 74k/200k (37%) · 3 tools · 2 subagents", mod._done_line(80000, 3, "74k/200k (37%)", 2))
+check("done line: no duration keeps context first", mod._done_line(None, 1, "1k/2k (50%)") == "Done · 1k/2k (50%) · 1 tool", mod._done_line(None, 1, "1k/2k (50%)"))
 check("done line: singular tool", mod._done_line(0, 1, "") == "Done · 1 tool")
 check("done line: nothing", mod._done_line(None, 0, "") == "Done.")
 
