@@ -10,6 +10,7 @@ import, stub pydantic, exec the head. Runs against the deployed copy too.
 
 import pathlib
 import sys
+import time
 import types
 
 PIPE = pathlib.Path(
@@ -99,8 +100,6 @@ check(
     },
 )
 
-import time
-
 NOW = time.mktime((2026, 9, 4, 12, 0, 0, 0, 0, -1))
 IN_4H = NOW + 4 * 3600
 IN_3D = NOW + 3 * 86400
@@ -134,6 +133,12 @@ later = mod._usage_limits(cache, NOW)
 check("later turn: latest per type, others kept", later["session_used"], 60)
 check("later turn: weekly survives", later["weekly_used"], 13)
 check("later turn: model window without reset", (later["opus_used"], "opus_resets" in later), (5, False))
+mod._note_rate_limit(cache, "overage", 0.9, NOW - 60)
+expired = mod._usage_limits(cache, NOW)
+check("expired window renders nothing", [k for k in expired if k.startswith("overage")], [])
+check("expired window dropped from cache", "overage" in cache, False)
+check("future window still renders after expiry sweep", expired["session_used"], 60)
+check("window without reset survives sweep", "seven_day_opus" in cache, True)
 
 full = owui_usage(USAGE, 80_000, 4, {"session_used": 37, "session_resets": "16:00"})
 check(

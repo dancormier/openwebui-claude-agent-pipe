@@ -598,8 +598,14 @@ def _note_rate_limit(
 def _usage_limits(
     cache: Dict[str, Dict[str, Any]], now: Optional[float] = None
 ) -> Dict[str, Any]:
+    now = time.time() if now is None else now
     out: Dict[str, Any] = {}
-    for rl_type, info in cache.items():
+    for rl_type, info in list(cache.items()):
+        # A window past its reset has no fresh event behind it yet; showing
+        # the old figure would be wrong, so say nothing until the CLI does.
+        if info.get("resets_at") and int(info["resets_at"]) < now:
+            del cache[rl_type]
+            continue
         key = _rate_limit_key(rl_type)
         if info.get("utilization") is not None:
             out[f"{key}_used"] = round(100 * float(info["utilization"]))
