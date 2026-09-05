@@ -86,7 +86,8 @@ too, billed per token.
 ### 2. Add the function
 
 In the UI: Admin Panel → Functions → **+**, paste the contents of
-[`claude_agent_pipe.py`](claude_agent_pipe.py), set the id to `claude_code`
+`claude_agent_pipe.py` from the [latest release](https://github.com/dancormier/openwebui-claude-agent-pipe/releases/latest)
+(the file on `main` may be ahead of the changelog), set the id to `claude_code`
 and any name, Save.
 
 Or over the admin API (bash, from the repository root):
