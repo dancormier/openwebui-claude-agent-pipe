@@ -4,7 +4,7 @@ Patches on top of [tfriedel/openwebui-claude-code](https://github.com/tfriedel/o
 commit `5bbc1fc`, in the order they landed. Numbering matches the pipe's own
 comments and the pull requests that introduced them.
 
-## Unreleased
+## v0.2.1 (2026-09-10)
 
 - Artifact delivery is capped per turn: at most 25 new files are uploaded
   and linked, at most 8 images render inline (the rest become download
