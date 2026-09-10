@@ -4,6 +4,17 @@ Patches on top of [tfriedel/openwebui-claude-code](https://github.com/tfriedel/o
 commit `5bbc1fc`, in the order they landed. Numbering matches the pipe's own
 comments and the pull requests that introduced them.
 
+## Unreleased
+
+- Artifact delivery is capped per turn: at most 25 new files are uploaded
+  and linked, at most 8 images render inline (the rest become download
+  links), and dot-directories in the workdir (`.git`, `.obsidian`, `.venv`)
+  are never scanned. A turn that cloned a repo into the workdir had linked
+  29,122 files and 1,972 inline images into one message, which locked the
+  browser tab on open. Past the cap the reply says how many files were not
+  linked. The helpers moved from `src/50_render.py` to `src/39_artifacts.py`
+  so the standalone test suite can reach them (`test_artifacts.py`).
+
 ## v0.2.0 (2026-09-04)
 
 - The message ⓘ popover now carries more than token counts: the turn's

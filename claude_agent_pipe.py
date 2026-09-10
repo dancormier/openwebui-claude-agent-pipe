@@ -1409,29 +1409,6 @@ def _format_chat_hits(hits: List[Dict[str, Any]], query: str) -> str:
     return "\n".join(lines)
 
 
-from claude_agent_sdk import (
-    AssistantMessage,
-    ClaudeAgentOptions,
-    ClaudeSDKClient,
-    CLIJSONDecodeError,
-    RateLimitEvent,
-    ResultMessage,
-    StreamEvent,
-    SystemMessage,
-    ToolResultBlock,
-    ToolUseBlock,
-    UserMessage,
-    create_sdk_mcp_server,
-    tool,
-)
-
-log = logging.getLogger(__name__)
-
-# OpenWebUI calls pipe() fresh for each chat turn. We keep a chat_id -> session_id
-# map in-process so follow-up turns resume the same Claude Code session.
-_chat_sessions: Dict[str, str] = {}
-
-
 _IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp"}
 _DOWNLOAD_EXTENSIONS = {
     ".pdf",
@@ -1454,6 +1431,13 @@ _ARTIFACT_EXTENSIONS = _IMAGE_EXTENSIONS | _DOWNLOAD_EXTENSIONS
 # via OpenWebUI's file endpoint, so they don't bloat the chat history even
 # when large — this is only a "don't accidentally ship a DVD ISO" guard.
 _MAX_ARTIFACT_BYTES = 50 * 1024 * 1024  # 50 MiB
+# Per-turn caps. An agent that clones a repo or unpacks an export into the
+# workdir makes every file in it "new"; one such turn linked 29,122 files
+# (1,972 of them inline images) into a single message, which locked the
+# browser tab on open (2026-09-10). Anything past the cap is counted, not
+# linked, and images past the inline cap become download links.
+_MAX_ARTIFACTS_PER_TURN = 25
+_MAX_INLINE_IMAGES = 8
 
 
 def _iter_artifact_files(scan_dirs: List[Path]) -> "list[Path]":
@@ -1465,14 +1449,25 @@ def _iter_artifact_files(scan_dirs: List[Path]) -> "list[Path]":
     save matplotlib/PIL output there from habit, but matching documents there
     too published every fetched-page scratch dump (.html/.txt) as an
     artifact. Document deliverables belong in the workdir, which keeps the
-    full extension set."""
+    full extension set.
+
+    Dot-directories in the workdir (`.git`, `.obsidian`, `.venv`) are pruned:
+    nothing under them is a deliverable, and a checkout's `.git` alone holds
+    thousands of matching-extension files."""
     seen: List[Path] = []
     for idx, root in enumerate(scan_dirs):
         if not root.exists():
             continue
-        iterator = root.rglob("*") if idx == 0 else root.iterdir()
         extensions = _ARTIFACT_EXTENSIONS if idx == 0 else _IMAGE_EXTENSIONS
-        for path in iterator:
+        if idx == 0:
+            for dirpath, dirnames, filenames in os.walk(root):
+                dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+                for name in filenames:
+                    path = Path(dirpath) / name
+                    if path.suffix.lower() in extensions and path.is_file():
+                        seen.append(path)
+            continue
+        for path in root.iterdir():
             if path.is_file() and path.suffix.lower() in extensions:
                 seen.append(path)
     return seen
@@ -1519,16 +1514,25 @@ def _inline_new_artifacts(
     except Exception as exc:
         return [f"\n\n_(File store unavailable: {exc})_\n"]
 
-    chunks: List[str] = []
-    doc_links: List[str] = []
+    changed: List[Path] = []
     for path in sorted(_iter_artifact_files(scan_dirs)):
         try:
             mtime = path.stat().st_mtime_ns
+        except OSError:
+            continue
+        if before.get(str(path)) != mtime:
+            changed.append(path)
+    overflow = max(0, len(changed) - _MAX_ARTIFACTS_PER_TURN)
+    changed = changed[:_MAX_ARTIFACTS_PER_TURN]
+
+    chunks: List[str] = []
+    doc_links: List[str] = []
+    inline_images = 0
+    for path in changed:
+        try:
             size = path.stat().st_size
         except OSError:
             continue
-        if before.get(str(path)) == mtime:
-            continue  # untouched
         if size > _MAX_ARTIFACT_BYTES:
             chunks.append(
                 f"\n\n_(Skipped {path.name}: {size // 1024 // 1024} MiB exceeds {_MAX_ARTIFACT_BYTES // 1024 // 1024} MiB limit.)_\n"
@@ -1578,7 +1582,8 @@ def _inline_new_artifacts(
             chunks.append(f"\n\n_(Saved but not linkable: {path.name}: {exc})_\n")
             continue
 
-        if is_image:
+        if is_image and inline_images < _MAX_INLINE_IMAGES:
+            inline_images += 1
             chunks.append(f"\n\n![{path.name}](/api/v1/files/{file_id}/content)\n")
         else:
             kib = size // 1024
@@ -1591,7 +1596,34 @@ def _inline_new_artifacts(
     if doc_links:
         label = "file" if len(doc_links) == 1 else f"{len(doc_links)} files"
         chunks.append(f"\n\n📎 {label}: " + " · ".join(doc_links) + "\n")
+    if overflow:
+        chunks.append(
+            f"\n\n_({overflow} more new files in the workdir not linked: only the "
+            f"first {_MAX_ARTIFACTS_PER_TURN} are uploaded per turn. Checkouts "
+            "and exports belong outside the workdir.)_\n"
+        )
     return chunks
+from claude_agent_sdk import (
+    AssistantMessage,
+    ClaudeAgentOptions,
+    ClaudeSDKClient,
+    CLIJSONDecodeError,
+    RateLimitEvent,
+    ResultMessage,
+    StreamEvent,
+    SystemMessage,
+    ToolResultBlock,
+    ToolUseBlock,
+    UserMessage,
+    create_sdk_mcp_server,
+    tool,
+)
+
+log = logging.getLogger(__name__)
+
+# OpenWebUI calls pipe() fresh for each chat turn. We keep a chat_id -> session_id
+# map in-process so follow-up turns resume the same Claude Code session.
+_chat_sessions: Dict[str, str] = {}
 
 
 def _extract_system_prompt(body: Dict[str, Any]) -> Optional[str]:
