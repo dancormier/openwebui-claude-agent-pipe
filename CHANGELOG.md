@@ -6,6 +6,9 @@ comments and the pull requests that introduced them.
 
 ## Unreleased
 
+- Artifact upload and inline-image caps are configurable through
+  `MAX_ARTIFACTS_PER_TURN` and `MAX_INLINE_IMAGES` valves. Their defaults
+  remain 25 uploaded files and 8 inline images per turn.
 - The README and the two credential valves now lead with the API key and
   present the subscription token as a single-user option that Anthropic's
   docs do not name for SDK-based products (they say "should use API key

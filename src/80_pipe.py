@@ -170,6 +170,24 @@
                 "attached too — enable on single-user hosts only."
             ),
         )
+        MAX_ARTIFACTS_PER_TURN: int = Field(
+            default=_MAX_ARTIFACTS_PER_TURN,
+            ge=1,
+            description=(
+                "Maximum new files uploaded and linked in one turn. The cap "
+                "prevents runaway checkouts or exports from linking thousands "
+                "of files into one message; one incident linked 29,122 files."
+            ),
+        )
+        MAX_INLINE_IMAGES: int = Field(
+            default=_MAX_INLINE_IMAGES,
+            ge=1,
+            description=(
+                "Maximum uploaded images rendered inline in one turn; later "
+                "images become download links. The cap prevents image-heavy "
+                "messages from locking the browser tab."
+            ),
+        )
         SETTING_SOURCES: str = Field(
             default="",
             description=(
@@ -804,6 +822,8 @@
                             scan_dirs,
                             artifact_snapshot,
                             (__user__ or {}).get("id"),
+                            self.valves.MAX_ARTIFACTS_PER_TURN,
+                            self.valves.MAX_INLINE_IMAGES,
                         ):
                             yield chunk
                         if inflight is not None and inflight.superseded:

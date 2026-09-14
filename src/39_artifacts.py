@@ -76,6 +76,8 @@ async def _inline_new_artifacts(
     scan_dirs: List[Path],
     before: Dict[str, int],
     user_id: Optional[str],
+    max_artifacts_per_turn: int = _MAX_ARTIFACTS_PER_TURN,
+    max_inline_images: int = _MAX_INLINE_IMAGES,
 ) -> List[str]:
     """Upload artifacts new or modified since `before` to OpenWebUI's file
     store, and return markdown referencing the served URLs.
@@ -111,8 +113,8 @@ async def _inline_new_artifacts(
             continue
         if before.get(str(path)) != mtime:
             changed.append(path)
-    overflow = max(0, len(changed) - _MAX_ARTIFACTS_PER_TURN)
-    changed = changed[:_MAX_ARTIFACTS_PER_TURN]
+    overflow = max(0, len(changed) - max_artifacts_per_turn)
+    changed = changed[:max_artifacts_per_turn]
 
     chunks: List[str] = []
     doc_links: List[str] = []
@@ -175,7 +177,7 @@ async def _inline_new_artifacts(
             chunks.append(f"\n\n_(Saved but not linkable: {path.name}: file row rejected)_\n")
             continue
 
-        if is_image and inline_images < _MAX_INLINE_IMAGES:
+        if is_image and inline_images < max_inline_images:
             inline_images += 1
             chunks.append(f"\n\n![{path.name}](/api/v1/files/{file_id}/content)\n")
         else:
@@ -192,7 +194,7 @@ async def _inline_new_artifacts(
     if overflow:
         chunks.append(
             f"\n\n_({overflow} more new files in the workdir not linked: only the "
-            f"first {_MAX_ARTIFACTS_PER_TURN} are uploaded per turn. Checkouts "
+            f"first {max_artifacts_per_turn} are uploaded per turn. Checkouts "
             "and exports belong outside the workdir.)_\n"
         )
     return chunks

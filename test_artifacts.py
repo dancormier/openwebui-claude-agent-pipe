@@ -150,6 +150,19 @@ with tempfile.TemporaryDirectory() as tmp:
     check("inline images capped", text.count("![") == mod._MAX_INLINE_IMAGES, text.count("!["))
     check("rest are file links", "📎 2 files:" in text, text[-300:])
 
+# ---- configured caps override the defaults together ----
+with tempfile.TemporaryDirectory() as tmp:
+    root = pathlib.Path(tmp)
+    before = mod._snapshot_artifacts([root])
+    for i in range(5):
+        touch(root, f"custom{i:02d}.png")
+    uploaded.clear()
+    text = "".join(inline([root], before, "user", 3, 1))
+    check("custom artifact cap limits uploads", len(uploaded) == 3, len(uploaded))
+    check("custom artifact cap reports overflow", "2 more new files" in text, text)
+    check("custom inline cap renders one image", text.count("![") == 1, text)
+    check("remaining uploaded images are links", "📎 2 files:" in text, text)
+
 # ---- async insert_new_file (Open WebUI 0.11) is awaited, not dropped ----
 with tempfile.TemporaryDirectory() as tmp:
     root = pathlib.Path(tmp)
