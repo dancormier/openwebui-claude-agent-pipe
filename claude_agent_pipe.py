@@ -2715,6 +2715,7 @@ class Pipe:
         MAX_ARTIFACTS_PER_TURN: int = Field(
             default=_MAX_ARTIFACTS_PER_TURN,
             ge=1,
+            le=500,
             description=(
                 "Maximum new files uploaded and linked in one turn. The cap "
                 "prevents runaway checkouts or exports from linking thousands "
@@ -2724,6 +2725,7 @@ class Pipe:
         MAX_INLINE_IMAGES: int = Field(
             default=_MAX_INLINE_IMAGES,
             ge=1,
+            le=500,
             description=(
                 "Maximum uploaded images rendered inline in one turn; later "
                 "images become download links. The cap prevents image-heavy "
