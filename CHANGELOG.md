@@ -4,7 +4,7 @@ Patches on top of [tfriedel/openwebui-claude-code](https://github.com/tfriedel/o
 commit `5bbc1fc`, in the order they landed. Numbering matches the pipe's own
 comments and the pull requests that introduced them.
 
-## Unreleased
+## v0.2.2 (2026-09-13)
 
 - Open WebUI 0.11 turned its model helpers async (`Files.insert_new_file`,
   `Files.get_file_by_id`, `Users.get_user_by_id`, `Knowledges.get_files_by_id`,
