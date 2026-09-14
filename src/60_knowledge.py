@@ -143,7 +143,7 @@ def _build_kb_mcp_server(
         user_id = (user_dict or {}).get("id")
         if user_id:
             try:
-                user_obj = Users.get_user_by_id(user_id)
+                user_obj = await _resolve(Users.get_user_by_id(user_id))
             except Exception:
                 pass
 
@@ -253,7 +253,7 @@ def _build_kb_mcp_server(
 
         for kid in kb_ids:
             try:
-                files = Knowledges.get_files_by_id(kid) or []
+                files = await _resolve(Knowledges.get_files_by_id(kid)) or []
             except Exception:
                 continue
             for f in files:
@@ -327,7 +327,7 @@ def _build_kb_mcp_server(
             }
 
         try:
-            file_obj = Files.get_file_by_id(file_id)
+            file_obj = await _resolve(Files.get_file_by_id(file_id))
         except Exception as exc:
             return {"content": [{"type": "text", "text": f"Lookup failed: {exc}"}]}
         if file_obj is None:

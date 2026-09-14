@@ -72,7 +72,7 @@ def _snapshot_artifacts(scan_dirs: List[Path]) -> Dict[str, int]:
     return snapshot
 
 
-def _inline_new_artifacts(
+async def _inline_new_artifacts(
     scan_dirs: List[Path],
     before: Dict[str, int],
     user_id: Optional[str],
@@ -152,7 +152,7 @@ def _inline_new_artifacts(
             continue
 
         try:
-            Files.insert_new_file(
+            row = await _resolve(Files.insert_new_file(
                 user_id,
                 FileForm(
                     id=file_id,
@@ -165,10 +165,14 @@ def _inline_new_artifacts(
                         "size": len(contents),
                     },
                 ),
-            )
+            ))
         except Exception as exc:
             log.exception("Artifact DB row failed: %s", path)
             chunks.append(f"\n\n_(Saved but not linkable: {path.name}: {exc})_\n")
+            continue
+        if row is None:
+            # insert_new_file logs and returns None instead of raising.
+            chunks.append(f"\n\n_(Saved but not linkable: {path.name}: file row rejected)_\n")
             continue
 
         if is_image and inline_images < _MAX_INLINE_IMAGES:

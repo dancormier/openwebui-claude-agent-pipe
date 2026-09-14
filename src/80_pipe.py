@@ -326,11 +326,11 @@
             if chat_id_meta and msg_id_meta:
                 from open_webui.models.chats import Chats
 
-                res = Chats.upsert_message_to_chat_by_id_and_message_id(
-                    chat_id_meta, msg_id_meta, {"usage": usage_payload}, touch=False
+                await _resolve(
+                    Chats.upsert_message_to_chat_by_id_and_message_id(
+                        chat_id_meta, msg_id_meta, {"usage": usage_payload}, touch=False
+                    )
                 )
-                if inspect.isawaitable(res):
-                    await res
         except Exception:
             log.debug("usage DB write failed", exc_info=True)
 
@@ -791,7 +791,7 @@
                                 __event_emitter__,
                                 __metadata__,
                             )
-                        for chunk in _inline_new_artifacts(
+                        for chunk in await _inline_new_artifacts(
                             scan_dirs,
                             artifact_snapshot,
                             (__user__ or {}).get("id"),

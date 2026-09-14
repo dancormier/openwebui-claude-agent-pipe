@@ -24,6 +24,16 @@ from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Set, Tup
 
 from pydantic import BaseModel, Field
 
+
+async def _resolve(value: Any) -> Any:
+    """Open WebUI 0.11 made its model helpers (Files, Users, Knowledges, Chats)
+    async; earlier releases are sync. Calling an async one without awaiting
+    returns a coroutine and silently does nothing, so every such call goes
+    through here."""
+    if inspect.isawaitable(value):
+        return await value
+    return value
+
 # ── Secret redaction ────────────────────────────────────────────────────────
 # Everything this pipe emits is persisted in webui.db chat history and synced
 # to mobile clients, so a secret that reaches the stream is a secret on disk
@@ -1483,7 +1493,7 @@ def _snapshot_artifacts(scan_dirs: List[Path]) -> Dict[str, int]:
     return snapshot
 
 
-def _inline_new_artifacts(
+async def _inline_new_artifacts(
     scan_dirs: List[Path],
     before: Dict[str, int],
     user_id: Optional[str],
@@ -1563,7 +1573,7 @@ def _inline_new_artifacts(
             continue
 
         try:
-            Files.insert_new_file(
+            row = await _resolve(Files.insert_new_file(
                 user_id,
                 FileForm(
                     id=file_id,
@@ -1576,10 +1586,14 @@ def _inline_new_artifacts(
                         "size": len(contents),
                     },
                 ),
-            )
+            ))
         except Exception as exc:
             log.exception("Artifact DB row failed: %s", path)
             chunks.append(f"\n\n_(Saved but not linkable: {path.name}: {exc})_\n")
+            continue
+        if row is None:
+            # insert_new_file logs and returns None instead of raising.
+            chunks.append(f"\n\n_(Saved but not linkable: {path.name}: file row rejected)_\n")
             continue
 
         if is_image and inline_images < _MAX_INLINE_IMAGES:
@@ -1790,7 +1804,7 @@ def _build_kb_mcp_server(
         user_id = (user_dict or {}).get("id")
         if user_id:
             try:
-                user_obj = Users.get_user_by_id(user_id)
+                user_obj = await _resolve(Users.get_user_by_id(user_id))
             except Exception:
                 pass
 
@@ -1900,7 +1914,7 @@ def _build_kb_mcp_server(
 
         for kid in kb_ids:
             try:
-                files = Knowledges.get_files_by_id(kid) or []
+                files = await _resolve(Knowledges.get_files_by_id(kid)) or []
             except Exception:
                 continue
             for f in files:
@@ -1974,7 +1988,7 @@ def _build_kb_mcp_server(
             }
 
         try:
-            file_obj = Files.get_file_by_id(file_id)
+            file_obj = await _resolve(Files.get_file_by_id(file_id))
         except Exception as exc:
             return {"content": [{"type": "text", "text": f"Lookup failed: {exc}"}]}
         if file_obj is None:
@@ -2852,11 +2866,11 @@ class Pipe:
             if chat_id_meta and msg_id_meta:
                 from open_webui.models.chats import Chats
 
-                res = Chats.upsert_message_to_chat_by_id_and_message_id(
-                    chat_id_meta, msg_id_meta, {"usage": usage_payload}, touch=False
+                await _resolve(
+                    Chats.upsert_message_to_chat_by_id_and_message_id(
+                        chat_id_meta, msg_id_meta, {"usage": usage_payload}, touch=False
+                    )
                 )
-                if inspect.isawaitable(res):
-                    await res
         except Exception:
             log.debug("usage DB write failed", exc_info=True)
 
@@ -3317,7 +3331,7 @@ class Pipe:
                                 __event_emitter__,
                                 __metadata__,
                             )
-                        for chunk in _inline_new_artifacts(
+                        for chunk in await _inline_new_artifacts(
                             scan_dirs,
                             artifact_snapshot,
                             (__user__ or {}).get("id"),

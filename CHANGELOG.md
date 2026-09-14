@@ -4,6 +4,19 @@ Patches on top of [tfriedel/openwebui-claude-code](https://github.com/tfriedel/o
 commit `5bbc1fc`, in the order they landed. Numbering matches the pipe's own
 comments and the pull requests that introduced them.
 
+## Unreleased
+
+- Open WebUI 0.11 turned its model helpers async (`Files.insert_new_file`,
+  `Files.get_file_by_id`, `Users.get_user_by_id`, `Knowledges.get_files_by_id`,
+  `Chats.upsert_message_to_chat_by_id_and_message_id`). The pipe called them
+  synchronously, so each returned an un-awaited coroutine: artifacts landed in
+  the upload directory with no `file` row and every inline image rendered as
+  "Image unavailable" (404 on `/api/v1/files/<id>/content`), and the
+  knowledge tools' user and file lookups returned nothing. Every such call now
+  goes through `_resolve()`, which awaits when it gets an awaitable and passes
+  a plain value through, so 0.10 and 0.11 both work. A `None` from
+  `insert_new_file` is reported in the reply instead of linked.
+
 ## v0.2.1 (2026-09-10)
 
 - Artifact delivery is capped per turn: at most 25 new files are uploaded

@@ -8,6 +8,7 @@ stub pydantic, exec the head. open_webui's file store is stubbed with an
 in-memory dict so the uploader runs without Open WebUI installed.
 """
 
+import asyncio
 import pathlib
 import sys
 import tempfile
@@ -37,8 +38,18 @@ class _Storage:
 
 
 class _Files:
+    """Open WebUI 0.11 made insert_new_file async; older releases are sync.
+    `mode` flips the stub so both shapes are exercised."""
+    mode = "sync"
+
     @staticmethod
     def insert_new_file(user_id, form):
+        if _Files.mode == "async":
+            async def _later():
+                return form
+            return _later()
+        if _Files.mode == "reject":
+            return None
         return form
 
 
@@ -62,6 +73,10 @@ mod.__dict__["__name__"] = "pipe_head"
 exec(compile(head, str(PIPE), "exec"), mod.__dict__)
 
 fails = []
+
+
+def inline(*args):
+    return asyncio.run(mod._inline_new_artifacts(*args))
 
 
 def check(name, cond, detail=""):
@@ -106,7 +121,7 @@ with tempfile.TemporaryDirectory() as tmp:
     for i in range(30):
         touch(root, f"f{i:02d}.md")
     uploaded.clear()
-    chunks = mod._inline_new_artifacts([root], before, "user")
+    chunks = inline([root], before, "user")
     text = "".join(chunks)
     check("uploads capped", len(uploaded) == mod._MAX_ARTIFACTS_PER_TURN, len(uploaded))
     check("overflow counted", "5 more new files" in text, text[-200:])
@@ -119,7 +134,7 @@ with tempfile.TemporaryDirectory() as tmp:
     before = mod._snapshot_artifacts([root])
     touch(root, "new.md")
     uploaded.clear()
-    chunks = mod._inline_new_artifacts([root], before, "user")
+    chunks = inline([root], before, "user")
     check("only the new file uploads", [u.split("_", 1)[1] for u in uploaded] == ["new.md"], uploaded)
     check("no overflow note under cap", "more new files" not in "".join(chunks))
 
@@ -130,10 +145,36 @@ with tempfile.TemporaryDirectory() as tmp:
     for i in range(10):
         touch(root, f"img{i:02d}.png")
     uploaded.clear()
-    text = "".join(mod._inline_new_artifacts([root], before, "user"))
+    text = "".join(inline([root], before, "user"))
     check("all images uploaded", len(uploaded) == 10, len(uploaded))
     check("inline images capped", text.count("![") == mod._MAX_INLINE_IMAGES, text.count("!["))
     check("rest are file links", "📎 2 files:" in text, text[-300:])
+
+# ---- async insert_new_file (Open WebUI 0.11) is awaited, not dropped ----
+with tempfile.TemporaryDirectory() as tmp:
+    root = pathlib.Path(tmp)
+    before = mod._snapshot_artifacts([root])
+    touch(root, "chart.png")
+    uploaded.clear()
+    _Files.mode = "async"
+    try:
+        text = "".join(inline([root], before, "user"))
+    finally:
+        _Files.mode = "sync"
+    check("async row insert yields an inline image", "![chart.png]" in text, text)
+    check("no un-awaited coroutine warning path", "not linkable" not in text, text)
+
+# ---- insert_new_file returning None is reported, not linked ----
+with tempfile.TemporaryDirectory() as tmp:
+    root = pathlib.Path(tmp)
+    before = mod._snapshot_artifacts([root])
+    touch(root, "chart.png")
+    _Files.mode = "reject"
+    try:
+        text = "".join(inline([root], before, "user"))
+    finally:
+        _Files.mode = "sync"
+    check("rejected row is not linked", "![" not in text and "not linkable" in text, text)
 
 print()
 if fails:
