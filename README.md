@@ -3,7 +3,8 @@
 An [Open WebUI](https://github.com/open-webui/open-webui) pipe function that
 runs each chat turn as a headless [Claude Agent SDK](https://code.claude.com/docs/en/agent-sdk/overview)
 session: Claude Code's full agent loop, with a real working directory and
-tools, behind a normal chat UI, billed to your Claude subscription. It is for
+tools, behind a normal chat UI, billed to an Anthropic API key or, on a
+single-user install, your Claude subscription. It is for
 one person (or one trusted admin) who already runs Open WebUI and wants Claude
 Code in it, on the web and on mobile clients, rather than only in a terminal.
 
@@ -67,8 +68,10 @@ repo is where the idea came from.
   or newer is installed by Open WebUI from the file's `requirements:` line
   and bundles the Claude Code CLI, so no Node.js and no separate `claude`
   install on the host.
-- A Claude Pro/Max/Team subscription (one-time `claude setup-token` on any
-  machine with a browser) or an Anthropic API key.
+- An Anthropic API key from the [Claude Console](https://platform.claude.com/),
+  or, for a single-user install, a Claude Pro/Max/Team subscription (one-time
+  `claude setup-token` on any machine with a browser). See
+  [Which credential](#1-get-a-credential) before choosing.
 - A directory the Open WebUI process can write, for `WORKDIR_ROOT`.
 
 Tested on macOS 15 (native install) and on Linux as root in the official
@@ -77,19 +80,32 @@ Tested on macOS 15 (native install) and on Linux as root in the official
 
 ## Install
 
-Five steps: a token, the function, its valves, the toggle, a first message.
+Five steps: a credential, the function, its valves, the toggle, a first message.
 
-### 1. Get a token
+### 1. Get a credential
 
-On any machine with a browser and Claude Code installed:
+**API key (recommended).** Create one in the
+[Claude Console](https://platform.claude.com/). Billed per token. This is the
+path Anthropic's docs name for products built on the Agent SDK
+([Legal and compliance](https://code.claude.com/docs/en/legal-and-compliance),
+"Authentication and credential use"), and the only one to use on any
+instance with more than one user.
+
+**Subscription token (single-user installs only).** On any machine with a
+browser and Claude Code installed:
 
 ```sh
 claude setup-token
 ```
 
-Copy the long-lived OAuth token it prints. This is the sanctioned way to run
-the Agent SDK on a Pro/Max/Team subscription. An `ANTHROPIC_API_KEY` works
-too, billed per token.
+Copy the long-lived OAuth token it prints. It authenticates your own
+Pro/Max/Team subscription for your own use. Anthropic currently counts Agent
+SDK usage against subscription limits and says it is still working out how
+plans should cover it; its docs also say SDK-based products should use an API
+key, and its position on subscription use outside Claude Code has changed
+before. Treat this path as unsupported and subject to change. Never put a
+subscription token on an instance other people use: routing other people's
+requests through your plan is what Anthropic's terms forbid outright.
 
 ### 2. Add the function
 
@@ -119,7 +135,9 @@ Either way, Open WebUI installs `claude-agent-sdk` from the file's
 
 Functions → Claude Code → ⚙ Valves. Two matter on first install:
 
-- `CLAUDE_CODE_OAUTH_TOKEN`: the token from step 1.
+- `ANTHROPIC_API_KEY`, or `CLAUDE_CODE_OAUTH_TOKEN` on a single-user
+  install: the credential from step 1. If both are set the token wins and
+  the key is unset for the agent.
 - `WORKDIR_ROOT`: a directory the Open WebUI process can write. The default
   is `/tmp/claude-agent-pipe`; use a persistent path so sessions survive
   reboots.
@@ -188,13 +206,14 @@ Read this before exposing the function to anyone but yourself.
 
 - **`bypassPermissions` is the default.** Every user who can pick the model
   runs arbitrary code as the Open WebUI process user, on the Open WebUI host,
-  with no prompts, using your OAuth token. Treat the function as a shell for
+  with no prompts, using your credential. Treat the function as a shell for
   everyone it is enabled for. Restrict it to admins in Open WebUI's model
   access controls, or tighten `PERMISSION_MODE` and `ALLOWED_TOOLS`.
 - **Valves are global.** One token, one `WORKDIR_ROOT`, one `REPO_MAP` for
   every user of the function. Two users cannot read each other's chats
   (chat search is scoped by user id) but they share the filesystem and the
-  subscription. This is a single-user or single-admin design.
+  credential. This is a single-user or single-admin design, and with a
+  subscription token it must be single-user: see step 1 of the install.
 - **`REPO_MAP` hands out paths.** Anyone who can start a `#repo:` chat runs
   the agent inside that repository. It grants nothing `bypassPermissions`
   did not already reach; it only sets the working directory.

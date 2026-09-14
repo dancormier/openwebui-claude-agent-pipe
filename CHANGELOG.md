@@ -4,6 +4,16 @@ Patches on top of [tfriedel/openwebui-claude-code](https://github.com/tfriedel/o
 commit `5bbc1fc`, in the order they landed. Numbering matches the pipe's own
 comments and the pull requests that introduced them.
 
+## Unreleased
+
+- The README and the two credential valves now lead with the API key and
+  present the subscription token as a single-user option that Anthropic's
+  docs do not name for SDK-based products (they say "should use API key
+  authentication"; Legal and compliance, "Authentication and credential
+  use"). The old text called `claude setup-token` "the sanctioned way to run
+  the Agent SDK on a subscription", which overstated it. Behaviour is
+  unchanged: the token still wins when both are set.
+
 ## v0.2.2 (2026-09-13)
 
 - Open WebUI 0.11 turned its model helpers async (`Files.insert_new_file`,
