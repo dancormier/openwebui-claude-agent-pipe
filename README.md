@@ -7,6 +7,14 @@ tools, behind a normal chat UI, billed to your Claude subscription. It is for
 one person (or one trusted admin) who already runs Open WebUI and wants Claude
 Code in it, on the web and on mobile clients, rather than only in a terminal.
 
+The agent can stop mid-turn and ask through Open WebUI's own form:
+
+![The ask_user form: a three-question multiple-choice form rendered in the chat, with the tool's status line above it](docs/ask-user.png)
+
+Every reply ends with what the turn cost:
+
+![Status line: Done, 39s, 133k of 1M context (13%), 5 tools](docs/status-line.png)
+
 ## Credit
 
 This is a fork of Thomas Friedel's
