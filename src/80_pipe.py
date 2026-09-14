@@ -173,19 +173,26 @@
         MAX_ARTIFACTS_PER_TURN: int = Field(
             default=_MAX_ARTIFACTS_PER_TURN,
             ge=1,
+            le=500,
             description=(
-                "Maximum new files uploaded and linked in one turn. The cap "
-                "prevents runaway checkouts or exports from linking thousands "
-                "of files into one message; one incident linked 29,122 files."
+                "Maximum new files uploaded and linked in one turn (1-500). "
+                "The cap prevents runaway checkouts or exports from linking "
+                "thousands of files into one message; one incident linked "
+                "29,122 files, and the 500 ceiling keeps that runaway "
+                "unreachable."
             ),
         )
         MAX_INLINE_IMAGES: int = Field(
             default=_MAX_INLINE_IMAGES,
             ge=1,
+            le=50,
             description=(
-                "Maximum uploaded images rendered inline in one turn; later "
-                "images become download links. The cap prevents image-heavy "
-                "messages from locking the browser tab."
+                "Maximum uploaded images rendered inline in one turn (1-50); "
+                "later images become download links. Inline images come out "
+                "of the MAX_ARTIFACTS_PER_TURN budget, so that valve must be "
+                "at least this high for the full count to render. The cap "
+                "prevents image-heavy messages from locking the browser tab, "
+                "which the same incident did with 1,972 inline images."
             ),
         )
         SETTING_SOURCES: str = Field(
