@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tests for the artifact walker and uploader (src/50_render.py).
+"""Tests for the artifact walker and uploader (src/39_artifacts.py).
 
 Run: python3 test_artifacts.py [<path-to-pipe.py>]
 
