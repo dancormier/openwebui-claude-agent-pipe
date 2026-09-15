@@ -24,6 +24,7 @@ _SECRET_PATTERNS: List[tuple] = [
     ("google-refresh-token", re.compile(r"1//0[A-Za-z0-9_\-]{20,}")),
     ("github-token", re.compile(r"gh[pousr]_[A-Za-z0-9]{20,}")),
     ("github-pat", re.compile(r"github_pat_[A-Za-z0-9_]{20,}")),
+    ("linear-api-key", re.compile(r"lin_(?:api|oauth)_[A-Za-z0-9]{20,}")),
     ("aws-access-key", re.compile(r"AKIA[0-9A-Z]{16}")),
     # 1Password service-account token (the op-secrets loader's own credential).
     ("onepassword-service-token", re.compile(r"ops_[A-Za-z0-9_\-]{20,}")),
