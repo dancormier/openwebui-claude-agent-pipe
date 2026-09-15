@@ -103,6 +103,20 @@
                 "themselves unavailable."
             ),
         )
+        REMOTE_MCP_SERVERS: str = Field(
+            default="",
+            description=(
+                "Remote MCP servers attached to every turn, as a JSON object "
+                'name -> {"url": "https://...", "headers": {...}}. Example: '
+                '{"linear": {"url": "https://mcp.linear.app/mcp", "headers": '
+                '{"Authorization": "Bearer lin_api_..."}}}. Header values are '
+                "credentials and live in Open WebUI's database like the keys "
+                "above. Names must be lowercase [a-z0-9_-]; plain http only to "
+                "localhost. Each server's tools are allowed as mcp__<name> and "
+                "arrive deferred, so the agent finds them through ToolSearch. "
+                "A malformed entry is logged and skipped; the rest still load."
+            ),
+        )
         CHAT_DB_PATH: str = Field(
             default="",
             description=(
@@ -562,6 +576,17 @@
             if chats_server is not None:
                 mcp_servers["chats"] = chats_server
                 allowed_tools = allowed_tools + chats_tool_names
+        remote_servers, _remote_tools, remote_errors = _parse_remote_mcp_servers(
+            self.valves.REMOTE_MCP_SERVERS
+        )
+        for msg in remote_errors:
+            log.warning("REMOTE_MCP_SERVERS: %s", msg)
+        for name, cfg in remote_servers.items():
+            if name in mcp_servers:
+                log.warning("REMOTE_MCP_SERVERS: %r shadows a built-in server; skipped", name)
+                continue
+            mcp_servers[name] = cfg
+            allowed_tools = allowed_tools + [f"mcp__{name}"]
 
         options_kwargs: Dict[str, Any] = {
             "cwd": str(cwd),

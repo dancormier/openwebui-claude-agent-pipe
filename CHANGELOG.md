@@ -4,6 +4,16 @@ Patches on top of [tfriedel/openwebui-claude-code](https://github.com/tfriedel/o
 commit `5bbc1fc`, in the order they landed. Numbering matches the pipe's own
 comments and the pull requests that introduced them.
 
+## v0.3.1 (2026-09-15)
+
+- `REMOTE_MCP_SERVERS` valve: attach hosted MCP servers (Linear, GitHub,
+  anything speaking streamable HTTP) to every turn as a JSON object of
+  `name -> {url, headers}`. Each becomes an SDK `http` server allowed as
+  `mcp__<name>`; a malformed entry is logged and skipped rather than
+  failing the turn. Plain `http://` is accepted only for localhost since the
+  headers carry credentials.
+- Redaction learns Linear API keys (`lin_api_…`, `lin_oauth_…`).
+
 ## v0.3.0 (2026-09-14)
 
 - Artifact upload and inline-image caps are configurable through
