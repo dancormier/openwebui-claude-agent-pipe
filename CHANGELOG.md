@@ -10,15 +10,14 @@ comments and the pull requests that introduced them.
   back to Open WebUI's `WEBUI_URL` environment variable) prefixes every
   uploaded-file link, so native clients such as Conduit, which render the
   message with no page origin, can open them. Empty keeps today's relative
-  links.
+  links. Inline images only load same-origin in practice (the auth cookie
+  is SameSite=Lax), so set it to the origin the user actually browses.
 - Markdown, text, YAML and JSON deliverables are recorded as `text/plain`,
   the one text type Open WebUI's file content route serves inline; they
   open in a tab instead of forcing a download.
-- New pure helper `_rewrite_workdir_paths` maps absolute workdir paths the
-  agent pasted into its prose to the uploaded file's URL. Not wired into the
-  turn yet: Open WebUI 0.11 does handle a `replace` event, but its final
-  `chat:completion` carries the server-side `output` items and the client
-  rebuilds the message text from those, undoing the replacement.
+- The system prompt now tells the agent that workdir files are uploaded
+  and linked automatically, and never to link one by its filesystem path,
+  which the client cannot open.
 
 ## v0.3.2 (2026-09-17)
 

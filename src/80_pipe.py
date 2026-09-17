@@ -675,6 +675,7 @@
         system_prompt = _extract_system_prompt(body)
         if system_prompt:
             append_parts.append(system_prompt)
+        append_parts.append(_ARTIFACTS_PROMPT)
         if self.valves.ASK_USER:
             append_parts.append(_ASK_USER_PROMPT)
         if chats_server is not None:

@@ -68,36 +68,33 @@ def _iter_artifact_files(scan_dirs: List[Path]) -> "list[Path]":
     return seen
 
 
+_ARTIFACTS_PROMPT = (
+    "Files you write into the workdir are uploaded and linked automatically "
+    "after your reply, as a paperclip line. Never link a workdir file by its "
+    "filesystem path: that path is not a URL the client can open."
+)
+
+_warned_base_urls: Set[str] = set()
+
+
 def _artifact_base_url(valve: str) -> str:
     """Origin to prefix artifact URLs with. Native clients (Conduit) render
     the message with no page origin, so a relative `/api/v1/files/...` link
-    has nowhere to resolve; the web UI is fine either way."""
-    base = (valve or "").strip() or os.environ.get("WEBUI_URL", "")
-    return base.strip().rstrip("/")
-
-
-def _rewrite_workdir_paths(text: str, path_to_url: Dict[str, str]) -> str:
-    """Swap absolute workdir paths the agent pasted into its prose for the
-    served URL of the uploaded copy. A link target keeps its label; a bare
-    path becomes a link named after the file. Longest path first so a file
-    whose path is a prefix of another's (`a.md` / `a.md.bak`) is not
-    half-rewritten; the lookahead keeps `a.md` from matching inside an
-    unknown `a.md5` or `a.md.old`, while a sentence-ending period still
-    counts as a boundary."""
-    for path in sorted(path_to_url, key=len, reverse=True):
-        url = path_to_url[path]
-        name = Path(path).name
-        pattern = re.compile(
-            r"(\]\()?" + re.escape(path) + r"(?![\w/-])(?!\.\w)"
-        )
-
-        def _sub(match: "re.Match[str]", url: str = url, name: str = name) -> str:
-            if match.group(1):
-                return match.group(1) + url
-            return f"[{name}]({url})"
-
-        text = pattern.sub(_sub, text)
-    return text
+    has nowhere to resolve; the web UI is fine either way. A scheme-less
+    value would render as a relative path (`chat.example.com/api/...`) and
+    produce dead links everywhere, so it is refused, not guessed at."""
+    base = ((valve or "").strip() or os.environ.get("WEBUI_URL", "")).strip()
+    if not base:
+        return ""
+    if not base.startswith(("http://", "https://")):
+        if base not in _warned_base_urls:
+            _warned_base_urls.add(base)
+            logging.getLogger(__name__).warning(
+                "Artifact base URL %r has no http(s) scheme; using relative links",
+                base,
+            )
+        return ""
+    return base.rstrip("/")
 
 
 def _snapshot_artifacts(scan_dirs: List[Path]) -> Dict[str, int]:

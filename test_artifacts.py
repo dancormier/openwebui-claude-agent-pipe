@@ -205,6 +205,8 @@ with tempfile.TemporaryDirectory() as tmp:
     check("absolute image link with base", "![chart.png](https://chat.example.com/api/v1/files/" in text, text)
     check("absolute doc link with base", "[report.md](https://chat.example.com/api/v1/files/" in text, text)
     check("no relative links remain", "](/api/v1/files/" not in text, text)
+    text = "".join(inline([root], before, "user", base_url=mod._artifact_base_url("https://h/owui/")))
+    check("path-prefixed base keeps the prefix", "[report.md](https://h/owui/api/v1/files/" in text, text)
 
 # ---- base URL resolution: valve, then WEBUI_URL, then relative ----
 _saved = os.environ.pop("WEBUI_URL", None)
@@ -213,6 +215,10 @@ try:
     os.environ["WEBUI_URL"] = "https://env.example.com/"
     check("env fallback, trailing slash stripped", mod._artifact_base_url("") == "https://env.example.com")
     check("valve wins over env", mod._artifact_base_url(" https://valve.example.com/ ") == "https://valve.example.com")
+    check("scheme-less valve falls back to relative", mod._artifact_base_url("chat.example.com") == "")
+    os.environ["WEBUI_URL"] = "env.example.com"
+    check("scheme-less env falls back to relative", mod._artifact_base_url("") == "")
+    check("path prefix kept", mod._artifact_base_url("https://h/owui/") == "https://h/owui")
 finally:
     if _saved is None:
         os.environ.pop("WEBUI_URL", None)
@@ -234,15 +240,9 @@ with tempfile.TemporaryDirectory() as tmp:
     check("png keeps its own type", types.get("g.png") == "image/png", types.get("g.png"))
     check("pdf keeps its own type", types.get("h.pdf") == "application/pdf", types.get("h.pdf"))
 
-# ---- pasted workdir paths rewrite to served URLs ----
-rw = mod._rewrite_workdir_paths
-m = {"/w/c/report.md": "U1", "/w/c/report.md.bak": "U2", "/w/c/img.png": "U3"}
-check("link target rewritten, label kept", rw("see [the report](/w/c/report.md) now", m) == "see [the report](U1) now")
-check("bare path becomes a named link", rw("saved to /w/c/img.png.", m) == "saved to [img.png](U3).")
-check("unrelated path untouched", rw("[x](/w/c/other.md) and /w/c/report.md5", m) == "[x](/w/c/other.md) and /w/c/report.md5")
-check("prefix path handled longest-first", rw("[a](/w/c/report.md.bak) [b](/w/c/report.md)", m) == "[a](U2) [b](U1)")
-check("unknown longer suffix untouched", rw("/w/c/report.md.old", m) == "/w/c/report.md.old")
-check("no mapping is a no-op", rw("plain text", {}) == "plain text")
+# ---- the agent is told not to link workdir files by path ----
+check("prompt names the paperclip line", "paperclip" in mod._ARTIFACTS_PROMPT)
+check("prompt forbids filesystem-path links", "Never link a workdir file by its filesystem path" in mod._ARTIFACTS_PROMPT)
 
 print()
 if fails:
