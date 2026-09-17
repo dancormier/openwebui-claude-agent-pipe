@@ -4,7 +4,7 @@ Patches on top of [tfriedel/openwebui-claude-code](https://github.com/tfriedel/o
 commit `5bbc1fc`, in the order they landed. Numbering matches the pipe's own
 comments and the pull requests that introduced them.
 
-## Unreleased
+## v0.3.3 (2026-09-17)
 
 - Artifact links can be absolute: the new `PUBLIC_BASE_URL` valve (falling
   back to Open WebUI's `WEBUI_URL` environment variable) prefixes every
