@@ -1,6 +1,8 @@
 
 def _build_ask_user_mcp_server(
-    event_call: Optional[Callable], wait_minutes: int = _ASK_USER_WAIT_MINUTES
+    event_call: Optional[Callable],
+    wait_minutes: int = _ASK_USER_WAIT_MINUTES,
+    rearm_seconds: int = _ASK_USER_REARM_SECONDS,
 ):
     """Return (mcp_config, tool_names) for the ask_user tool. Registered even
     without an event_call: the tool then hands the questions back as markdown
@@ -75,16 +77,13 @@ def _build_ask_user_mcp_server(
             result = _no_ui_result(questions)
         else:
             payload = _user_input_payload(questions)
-            try:
-                output = await asyncio.wait_for(
-                    event_call(payload), _ask_user_wait_seconds(wait_minutes)
-                )
-            except asyncio.TimeoutError:
-                log.warning("ask_user form never answered within %s min", wait_minutes)
-                output = {"error": "Event call timed out: the form never answered."}
-            except Exception as exc:
-                log.warning("ask_user event_call failed: %s", exc)
-                output = {"error": f"{type(exc).__name__}: {exc}"}
+            output = await _ask_with_rearm(
+                event_call, payload,
+                _ask_user_wait_seconds(wait_minutes),
+                _ask_user_rearm_seconds(rearm_seconds),
+            )
+            if isinstance(output, dict) and output.get("error"):
+                log.warning("ask_user form not answered: %s", output["error"])
             result = _map_user_input_response(output, questions)
         return {
             "content": [

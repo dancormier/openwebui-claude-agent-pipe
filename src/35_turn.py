@@ -218,7 +218,7 @@ def _on_tool_use(
     if agent:
         agent["tools"] += 1
         label = f"↳ {agent['label']} · {label}"
-    state.active_tools[tool_id] = {"label": label, "started": now}
+    state.active_tools[tool_id] = {"label": label, "started": now, "name": name}
     chunks: List[str] = []
     if inline_details:
         summary_text = f"🔧 {name}" + (f" · {preview}" if preview else "")
@@ -272,6 +272,12 @@ def _session_status(resumed: bool, history: List[Dict[str, Any]]) -> str:
     if _history_fingerprint(history) != _EMPTY_FP:
         return "Session: cold start — history replayed"
     return "Session: new chat"
+
+
+def _only_ask_user(active_tools: Dict[str, Dict[str, Any]]) -> bool:
+    return bool(active_tools) and all(
+        t.get("name") == _ASK_USER_TOOL for t in active_tools.values()
+    )
 
 
 def _heartbeat_label(active_tools: Dict[str, Dict[str, Any]], now: float) -> Tuple[str, int]:

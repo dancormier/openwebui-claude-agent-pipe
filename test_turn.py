@@ -114,6 +114,9 @@ label, elapsed = mod._heartbeat_label(st.active_tools, 110.0)
 check("heartbeat: multiple tools names count and oldest", label == "3 tools · longest Bash: ls -la" and elapsed == 10, label)
 one = {"t9": {"label": "Read: a.txt", "started": 5.0}}
 check("heartbeat: single tool label", mod._heartbeat_label(one, 8.9) == ("Read: a.txt", 3))
+check("tool use: records the tool name for the form check", st.active_tools["t1"]["name"] == "Bash")
+for elapsed, want in ((0, 2.0), (29.9, 2.0), (30, 15.0), (299, 15.0), (300, 60.0), (3600, 60.0)):
+    check(f"heartbeat interval at {elapsed}s", mod._heartbeat_interval(elapsed) == want, mod._heartbeat_interval(elapsed))
 
 # ---- tool result ----
 chunks, status = mod._on_tool_result("t1", False, "ok", st, True)

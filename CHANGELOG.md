@@ -4,6 +4,25 @@ Patches on top of [tfriedel/openwebui-claude-code](https://github.com/tfriedel/o
 commit `5bbc1fc`, in the order they landed. Numbering matches the pipe's own
 comments and the pull requests that introduced them.
 
+## Unreleased
+
+- An unanswered `ask_user` form is re-sent every `ASK_USER_REARM_SECONDS`
+  (new valve, default 60, 0 disables) until it is answered, cancelled, or
+  `ASK_USER_WAIT_MINUTES` runs out. The web client only renders the form
+  when that chat is open and the reply is already in view; anything else
+  it drops without a word, and nothing re-offered it, so a form raised
+  the second a chat was re-opened sat unanswered for the whole wait
+  (2026-09-17). A re-send resets a form part-way through being answered;
+  that is the accepted cost of getting a dropped one back. Every send
+  still in flight is cancelled once one settles, and a server-side
+  "timed out" on an older send is ignored while a newer one is pending.
+- The running-tool heartbeat backs off: every 2 s for the first 30 s,
+  then 15 s, then 60 s after 5 minutes. Open WebUI 0.11 keeps every
+  status event in the message's history with no dedupe, so an 8-minute
+  wait used to leave ~240 rows behind. While the only running tool is
+  the `ask_user` form, one "Waiting for your answer to the form…" line
+  is emitted and then nothing until it completes.
+
 ## v0.3.2 (2026-09-17)
 
 - The `ask_user` form no longer expires on its own: the event carries no
