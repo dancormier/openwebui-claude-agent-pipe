@@ -105,11 +105,12 @@ check("reply hint covers every question", md.rstrip().endswith("Reply with your 
 payload = mod._user_input_payload(norm)
 check("payload is the request:user_input event", payload["type"] == "request:user_input" and payload["data"]["questions"] is norm)
 check("payload allow_other true if any question allows it", payload["data"]["allow_other"] is True)
-check("default timeout inside OWUI's 60-240s window", 60_000 <= payload["data"]["timeout_ms"] <= 240_000)
-check("out-of-range timeout falls back", mod._user_input_payload(norm, 5)["data"]["timeout_ms"] == mod._ASK_USER_TIMEOUT_MS)
-check("in-range timeout kept", mod._user_input_payload(norm, 90_000)["data"]["timeout_ms"] == 90_000)
-check("wait bound is the form timeout plus the grace", mod._ask_user_wait_seconds(mod._user_input_payload(norm, 90_000)) == (90_000 + mod._ASK_USER_TIMEOUT_GRACE_MS) / 1000)
-check("wait bound tracks the fallback timeout", mod._ask_user_wait_seconds(mod._user_input_payload(norm, 5)) == (mod._ASK_USER_TIMEOUT_MS + mod._ASK_USER_TIMEOUT_GRACE_MS) / 1000)
+check("payload carries no timeout_ms, so the form never expires on its own", "timeout_ms" not in payload["data"], payload)
+check("wait bound is the valve in seconds", mod._ask_user_wait_seconds(30) == 1800.0)
+check("wait bound default", mod._ask_user_wait_seconds(mod._ASK_USER_WAIT_MINUTES) == mod._ASK_USER_WAIT_MINUTES * 60.0)
+for bad in (0, -5, 241, "30", None, 2.5):
+    check(f"wait bound {bad!r} falls back to the default", mod._ask_user_wait_seconds(bad) == mod._ASK_USER_WAIT_MINUTES * 60.0)
+check("wait bound max kept", mod._ask_user_wait_seconds(mod._ASK_USER_WAIT_MINUTES_MAX) == mod._ASK_USER_WAIT_MINUTES_MAX * 60.0)
 
 # ---- reply mapping ----
 r = mod._map_user_input_response({"answers": {"q1": "Only auth", "busy": " Retry "}}, norm)
@@ -127,7 +128,6 @@ check("form other object → its text, stripped", r["answers"]["busy"] == "wait 
 r = mod._map_user_input_response({"answers": {"q1": {"type": "other", "text": "  "}}}, norm)
 check("blank other text → unanswered", r["status"] == "unanswered")
 for name, out in [
-    ("timeout", {"error": "Event call timed out. The browser tab may be inactive or closed."}),
     ("cancelled", {"status": "cancelled"}),
     ("non-dict", None),
     ("no answers key", {"status": "answered"}),
@@ -135,7 +135,12 @@ for name, out in [
 ]:
     r = mod._map_user_input_response(out, norm)
     check(f"{name} → unanswered with instruction", r["status"] == "unanswered" and r["instruction"] == mod._ASK_USER_UNANSWERED_INSTRUCTION, r)
-check("timeout reason carried", "timed out" in mod._map_user_input_response({"error": "Event call timed out."}, norm)["reason"])
+for name, err in [
+    ("pipe wait ran out", "Event call timed out: the form never answered."),
+    ("server bound ran out", "Event call timed out. The browser tab may be inactive or closed."),
+]:
+    r = mod._map_user_input_response({"error": err}, norm)
+    check(f"{name} → lost with the markdown and the lost instruction", r["status"] == "lost" and r["ask_in_reply"] == md and r["instruction"] == mod._ASK_USER_LOST_INSTRUCTION and r["reason"] == err, r)
 for name, err in [("client without a form", "Invalid user input request."), ("dropped session", "Client session disconnected.")]:
     r = mod._map_user_input_response({"error": err}, norm)
     check(f"{name} → no_ui with the markdown", r["status"] == "no_ui" and r["ask_in_reply"] == md and r["reason"] == err, r)

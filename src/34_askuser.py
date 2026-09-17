@@ -10,16 +10,25 @@
 _ASK_USER_TOOL = "mcp__ask-user__ask_user"
 _ASK_USER_MAX_QUESTIONS = 4
 _ASK_USER_MAX_OPTIONS = 3
-_ASK_USER_TIMEOUT_MS = 240_000
-# The form's own timer expiry answers with a cancel; the grace covers the
-# round trip. Open WebUI's server-side wait (WEBSOCKET_EVENT_CALLER_TIMEOUT)
-# is unset by default, which is `timeout=None`: a form unmounted by a chat
-# switch or reload never answers, and without this bound the tool call —
-# and the turn — hang forever (seen 2026-09-03).
-_ASK_USER_TIMEOUT_GRACE_MS = 15_000
+# The event carries no `timeout_ms`: Open WebUI 0.11.3 starts the form's
+# countdown only for a positive number, and its expiry is the same cancel
+# path as the Cancel button, so it dismissed a form the user was still
+# typing into. The wait below is a backstop for a form that can never
+# answer — unmounted by a chat switch or reload, which sends no cancel and
+# hung the turn forever (seen 2026-09-03). The server's own bound
+# (WEBSOCKET_EVENT_CALLER_TIMEOUT, unset = forever) cuts the wait first if
+# it is shorter; the outcome is the same either way.
+_ASK_USER_WAIT_MINUTES = 30
+_ASK_USER_WAIT_MINUTES_MAX = 240
 _ASK_USER_UNANSWERED_INSTRUCTION = (
     "The user did not answer. Proceed on your best assumption and say "
     "which one you took."
+)
+_ASK_USER_LOST_INSTRUCTION = (
+    "The form was lost before the user answered (chat switched, page "
+    "reloaded, or the wait ran out). Put the ask_in_reply text in your "
+    "reply verbatim, then end the turn without doing the work; the user's "
+    "next message carries the answers."
 )
 _ASK_USER_NO_UI_INSTRUCTION = (
     "This client has no question form. Put the ask_in_reply text in your "
@@ -104,23 +113,20 @@ def _render_questions_markdown(questions: List[Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-def _user_input_payload(
-    questions: List[Dict[str, Any]], timeout_ms: int = _ASK_USER_TIMEOUT_MS
-) -> Dict[str, Any]:
-    if not isinstance(timeout_ms, int) or not 60_000 <= timeout_ms <= 240_000:
-        timeout_ms = _ASK_USER_TIMEOUT_MS
+def _user_input_payload(questions: List[Dict[str, Any]]) -> Dict[str, Any]:
     return {
         "type": "request:user_input",
         "data": {
             "questions": questions,
             "allow_other": any(q["allow_other"] for q in questions),
-            "timeout_ms": timeout_ms,
         },
     }
 
 
-def _ask_user_wait_seconds(payload: Dict[str, Any]) -> float:
-    return (payload["data"]["timeout_ms"] + _ASK_USER_TIMEOUT_GRACE_MS) / 1000
+def _ask_user_wait_seconds(wait_minutes: Any) -> float:
+    if not isinstance(wait_minutes, int) or not 1 <= wait_minutes <= _ASK_USER_WAIT_MINUTES_MAX:
+        wait_minutes = _ASK_USER_WAIT_MINUTES
+    return wait_minutes * 60.0
 
 
 def _answer_text(value: Any) -> str:
@@ -137,20 +143,23 @@ def _answer_text(value: Any) -> str:
 def _map_user_input_response(
     output: Any, questions: List[Dict[str, Any]]
 ) -> Dict[str, Any]:
-    """Turn the form's reply into the tool result. A cancel or a timeout
-    means the user saw the form and did not answer → `unanswered`. Any
-    other error means the form never reached them — a client that holds a
-    socket session but has no form (Conduit answers the event with
-    "Invalid user input request.", verified 2026-09-02), or a dropped
-    session — so the questions fall through to the no-form path."""
+    """Turn the form's reply into the tool result. A cancel means the user
+    saw the form and declined → `unanswered`. A timeout means the form was
+    unmounted before it could answer (the form itself never expires) →
+    `lost`, with the questions rendered for the reply. Any other error
+    means the form never reached them — a client that holds a socket
+    session but has no form (Conduit answers the event with "Invalid user
+    input request.", verified 2026-09-02), or a dropped session — so the
+    questions fall through to the no-form path."""
     if not isinstance(output, dict):
         return {"status": "unanswered", "reason": "no response",
                 "instruction": _ASK_USER_UNANSWERED_INSTRUCTION}
     if output.get("error"):
         reason = str(output["error"])
         if "timed out" in reason.lower():
-            return {"status": "unanswered", "reason": reason,
-                    "instruction": _ASK_USER_UNANSWERED_INSTRUCTION}
+            return {"status": "lost", "reason": reason,
+                    "ask_in_reply": _render_questions_markdown(questions),
+                    "instruction": _ASK_USER_LOST_INSTRUCTION}
         return {**_no_ui_result(questions), "reason": reason}
     if output.get("status") == "cancelled":
         return {"status": "unanswered", "reason": "cancelled",
