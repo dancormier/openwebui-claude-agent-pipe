@@ -218,7 +218,7 @@ def _on_tool_use(
     if agent:
         agent["tools"] += 1
         label = f"↳ {agent['label']} · {label}"
-    state.active_tools[tool_id] = {"label": label, "started": now}
+    state.active_tools[tool_id] = {"label": label, "started": now, "name": name}
     chunks: List[str] = []
     if inline_details:
         summary_text = f"🔧 {name}" + (f" · {preview}" if preview else "")
@@ -274,12 +274,23 @@ def _session_status(resumed: bool, history: List[Dict[str, Any]]) -> str:
     return "Session: new chat"
 
 
+def _only_ask_user(active_tools: Dict[str, Dict[str, Any]]) -> bool:
+    return bool(active_tools) and all(
+        t.get("name") == _ASK_USER_TOOL for t in active_tools.values()
+    )
+
+
 def _heartbeat_label(active_tools: Dict[str, Dict[str, Any]], now: float) -> Tuple[str, int]:
-    oldest = min(active_tools.values(), key=lambda t: t["started"])
+    # A form waiting on the user is not "running"; only the quiet-wait
+    # status may mention it, so the ticks describe the ordinary tools.
+    tools = [t for t in active_tools.values() if t.get("name") != _ASK_USER_TOOL]
+    if not tools:
+        tools = list(active_tools.values())
+    oldest = min(tools, key=lambda t: t["started"])
     elapsed = int(now - oldest["started"])
-    if len(active_tools) == 1:
+    if len(tools) == 1:
         return oldest["label"], elapsed
-    return f"{len(active_tools)} tools · longest {oldest['label']}", elapsed
+    return f"{len(tools)} tools · longest {oldest['label']}", elapsed
 
 
 def _context_from_usage(cu: Dict[str, Any]) -> str:

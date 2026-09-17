@@ -9,6 +9,7 @@ in the web UI; these cover the normalization, the no-form markdown, and the
 reply mapping that both paths share.
 """
 
+import asyncio
 import pathlib
 import sys
 import types
@@ -112,6 +113,124 @@ for bad in (0, -5, 241, "30", None, 2.5):
     check(f"wait bound {bad!r} falls back to the default", mod._ask_user_wait_seconds(bad) == mod._ASK_USER_WAIT_MINUTES * 60.0)
 check("wait bound max kept", mod._ask_user_wait_seconds(mod._ASK_USER_WAIT_MINUTES_MAX) == mod._ASK_USER_WAIT_MINUTES_MAX * 60.0)
 
+# ---- rearm bound ----
+check("rearm bound is the valve as float seconds", mod._ask_user_rearm_seconds(60) == 60.0)
+check("rearm 0 disables", mod._ask_user_rearm_seconds(0) == 0.0)
+check("rearm below the floor clamps up", mod._ask_user_rearm_seconds(3) == mod._ASK_USER_REARM_SECONDS_MIN)
+check("rearm above the ceiling clamps down", mod._ask_user_rearm_seconds(9999) == mod._ASK_USER_REARM_SECONDS_MAX)
+for bad in ("60", None, 2.5, True):
+    check(f"rearm {bad!r} falls back to the default", mod._ask_user_rearm_seconds(bad) == float(mod._ASK_USER_REARM_SECONDS))
+check("negative rearm disables", mod._ask_user_rearm_seconds(-1) == 0.0)
+
+# ---- which outcomes settle the wait ----
+check("answers settle", mod._ask_output_settles({"answers": {"q1": "x"}}, True))
+check("cancel settles", mod._ask_output_settles({"status": "cancelled"}, True))
+check("dead session settles even with others pending", mod._ask_output_settles({"error": "Client session disconnected."}, True))
+check("server timeout ignored while a re-send is pending", not mod._ask_output_settles({"error": "Event call timed out. The browser tab may be inactive or closed."}, True))
+check("server timeout settles when nothing else is pending", mod._ask_output_settles({"error": "Event call timed out. The browser tab may be inactive or closed."}, False))
+check("non-dict settles", mod._ask_output_settles(None, True))
+
+
+# ---- rearm orchestration ----
+class FakeClient:
+    """Each send resolves per its script: a value, an exception, or None
+    (never answers). Counts sends and cancellations so leaks are visible."""
+
+    def __init__(self, script):
+        self.script = list(script)
+        self.sends = 0
+        self.cancelled = 0
+        self.payloads = []
+
+    async def __call__(self, payload):
+        self.payloads.append(payload)
+        index = self.sends
+        self.sends += 1
+        outcome = self.script[index] if index < len(self.script) else None
+        try:
+            if outcome is None:
+                await asyncio.sleep(3600)
+            if isinstance(outcome, Exception):
+                raise outcome
+            if isinstance(outcome, tuple):
+                delay, value = outcome
+                await asyncio.sleep(delay)
+                return value
+            return outcome
+        except asyncio.CancelledError:
+            self.cancelled += 1
+            raise
+
+
+def run(client, wait=5.0, rearm=0.05):
+    return asyncio.run(mod._ask_with_rearm(client, PAYLOAD, wait, rearm))
+
+
+PAYLOAD = mod._user_input_payload(norm)
+answered = {"answers": {"q1": "Only auth"}}
+
+c = FakeClient([answered])
+check("answered on first send", run(c) == answered and c.sends == 1 and c.cancelled == 0, (c.sends, c.cancelled))
+
+c = FakeClient([None, answered])
+check("re-armed send answers, first cancelled", run(c) == answered and c.sends == 2 and c.cancelled == 1, (c.sends, c.cancelled))
+check("re-send carries the same payload", c.payloads[0] is c.payloads[1] is PAYLOAD)
+
+c = FakeClient([None, None, {"status": "cancelled"}])
+check("cancel on a later send settles, both earlier sends cancelled", run(c)["status"] == "cancelled" and c.sends == 3 and c.cancelled == 2, (c.sends, c.cancelled))
+
+c = FakeClient([{"error": "Client session disconnected."}])
+check("error dict on first send returns immediately", run(c, rearm=1.0) == {"error": "Client session disconnected."} and c.sends == 1)
+
+c = FakeClient([RuntimeError("boom")])
+r = run(c, rearm=1.0)
+check("raised send becomes the error dict", r == {"error": "RuntimeError: boom"} and c.sends == 1, r)
+
+c = FakeClient([(0.02, {"error": "Event call timed out. The browser tab may be inactive or closed."}), (0.1, answered)])
+r = run(c, rearm=0.01)
+check("server timeout on the first send is ignored while a re-send is pending", r == answered and c.sends >= 2, (r, c.sends))
+
+TIMED_OUT = {"error": "Event call timed out. The browser tab may be inactive or closed."}
+
+
+class GatedClient(FakeClient):
+    """Every send parks on one shared gate, so releasing it completes all of
+    them in the same loop pass and the same `asyncio.wait` batch."""
+
+    def __init__(self, script):
+        super().__init__(script)
+        self.gate = None
+
+    async def __call__(self, payload):
+        index = self.sends
+        self.sends += 1
+        await self.gate.wait()
+        return self.script[index]
+
+
+async def same_batch(client):
+    client.gate = asyncio.Event()
+    task = asyncio.ensure_future(mod._ask_with_rearm(client, PAYLOAD, 5.0, 0.01))
+    while client.sends < 2:
+        await asyncio.sleep(0.001)
+    client.gate.set()
+    return await task
+
+
+for order, script in (("timeout first", [TIMED_OUT, answered]), ("answers first", [answered, TIMED_OUT])):
+    c = GatedClient(script)
+    r = asyncio.run(same_batch(c))
+    check(f"same-batch completion, {order}: answers win over the stale timeout", r == answered and c.sends == 2, (r, c.sends))
+
+c = FakeClient([None])
+check("rearm disabled sends exactly once and expires as timed out", run(c, wait=0.1, rearm=0) == {"error": mod._ASK_USER_TIMED_OUT} and c.sends == 1 and c.cancelled == 1, (c.sends, c.cancelled))
+
+c = FakeClient([])
+r = run(c, wait=0.12, rearm=0.05)
+check("total wait expiry returns the timed-out shape", r == {"error": mod._ASK_USER_TIMED_OUT}, r)
+check("expiry cancels every outstanding send", c.sends >= 2 and c.cancelled == c.sends, (c.sends, c.cancelled))
+check("expired wait maps to lost", mod._map_user_input_response(r, norm)["status"] == "lost")
+
 # ---- reply mapping ----
 r = mod._map_user_input_response({"answers": {"q1": "Only auth", "busy": " Retry "}}, norm)
 check("answers mapped and stripped", r == {"status": "answered", "answers": {"q1": "Only auth", "busy": "Retry"}}, r)
@@ -157,6 +276,10 @@ check("tool preview uses the custom hook", mod._tool_preview(mod._ASK_USER_TOOL,
 st = mod._TurnState()
 _, status = mod._on_tool_use(mod._ASK_USER_TOOL, {"questions": Q}, "t1", st, False, 0.0)
 check("status line while waiting", status == f"🔧 {mod._ASK_USER_TOOL}: Which files should the migration touch?", status)
+check("form is the only active tool → quiet wait", mod._only_ask_user(st.active_tools))
+mod._on_tool_use("Bash", {"command": "ls"}, "t2", st, False, 1.0)
+check("form plus another tool → normal heartbeat", not mod._only_ask_user(st.active_tools))
+check("no active tools → not a quiet wait", not mod._only_ask_user({}))
 
 if fails:
     print(f"\nFAILED: {len(fails)} — " + ", ".join(fails))

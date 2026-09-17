@@ -561,6 +561,14 @@ def _owui_usage(
     return out
 
 
+def _heartbeat_interval(elapsed_seconds: float) -> float:
+    if elapsed_seconds < 30:
+        return 2.0
+    if elapsed_seconds < 300:
+        return 15.0
+    return 60.0
+
+
 def _fmt_duration(ms: int) -> str:
     s = max(0, round(ms / 1000))
     if s < 60:
@@ -714,6 +722,15 @@ _ASK_USER_MAX_OPTIONS = 3
 # it is shorter; the outcome is the same either way.
 _ASK_USER_WAIT_MINUTES = 30
 _ASK_USER_WAIT_MINUTES_MAX = 240
+# The web client renders the event only if that chat is open and the reply
+# message is already in its local store; otherwise it drops it silently and
+# never acknowledges (a form sent the same second the chat was re-opened
+# was lost, 2026-09-17). Re-sending the same event resets the same form, so
+# a periodic re-send is what gets a dropped form in front of the user.
+_ASK_USER_REARM_SECONDS = 60
+_ASK_USER_REARM_SECONDS_MIN = 10
+_ASK_USER_REARM_SECONDS_MAX = 600
+_ASK_USER_TIMED_OUT = "Event call timed out: the form never answered."
 _ASK_USER_UNANSWERED_INSTRUCTION = (
     "The user did not answer. Proceed on your best assumption and say "
     "which one you took."
@@ -821,6 +838,87 @@ def _ask_user_wait_seconds(wait_minutes: Any) -> float:
     if not isinstance(wait_minutes, int) or not 1 <= wait_minutes <= _ASK_USER_WAIT_MINUTES_MAX:
         wait_minutes = _ASK_USER_WAIT_MINUTES
     return wait_minutes * 60.0
+
+
+def _ask_user_rearm_seconds(rearm_seconds: Any) -> float:
+    """0 disables the re-send; anything else is clamped into the bounds."""
+    if not isinstance(rearm_seconds, int) or isinstance(rearm_seconds, bool):
+        rearm_seconds = _ASK_USER_REARM_SECONDS
+    if rearm_seconds <= 0:
+        return 0.0
+    return float(min(max(rearm_seconds, _ASK_USER_REARM_SECONDS_MIN), _ASK_USER_REARM_SECONDS_MAX))
+
+
+def _ask_output_settles(output: Any, others_pending: bool) -> bool:
+    """Whether one send's outcome ends the wait. A server-side timeout on
+    one send says nothing about a later re-send still in flight
+    (WEBSOCKET_EVENT_CALLER_TIMEOUT below the valve ages the first call out
+    before the pipe's own wait does), so it is ignored while others remain;
+    every other outcome — answers, cancel, a dead session — is final."""
+    if others_pending and isinstance(output, dict):
+        reason = str(output.get("error") or "")
+        if reason and "timed out" in reason.lower():
+            return False
+    return True
+
+
+def _task_output(task: "asyncio.Task") -> Any:
+    try:
+        return task.result()
+    except asyncio.CancelledError:
+        return {"error": _ASK_USER_TIMED_OUT}
+    except Exception as exc:
+        return {"error": f"{type(exc).__name__}: {exc}"}
+
+
+async def _ask_with_rearm(
+    event_call: Callable, payload: Dict[str, Any],
+    wait_seconds: float, rearm_seconds: float,
+) -> Any:
+    """Send the form, re-send it every rearm_seconds until something
+    answers, and give up at wait_seconds with the timed-out error shape.
+    Every send still in flight is cancelled before returning, so no socket
+    call outlives the tool."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + wait_seconds
+    tasks: List["asyncio.Task"] = [asyncio.ensure_future(event_call(payload))]
+    try:
+        while True:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return {"error": _ASK_USER_TIMED_OUT}
+            pending = [t for t in tasks if not t.done()]
+            if not pending:
+                if not rearm_seconds:
+                    return {"error": _ASK_USER_TIMED_OUT}
+                pending = [asyncio.ensure_future(event_call(payload))]
+                tasks.append(pending[0])
+            timeout = min(remaining, rearm_seconds) if rearm_seconds else remaining
+            done, _ = await asyncio.wait(
+                pending, timeout=timeout, return_when=asyncio.FIRST_COMPLETED
+            )
+            # Two sends can land in one batch; `done` is a set, so a stale
+            # timeout must never win over the answers sitting next to it.
+            outputs = [_task_output(t) for t in done]
+            for output in outputs:
+                if _ask_output_settles(output, True):
+                    return output
+            if outputs and not any(not t.done() for t in tasks):
+                return outputs[0]
+            # Every cancelled send leaves its ack callback registered in
+            # python-socketio's manager until the client acks or disconnects
+            # (socketio/async_server.py `call`, base_manager.py), so each
+            # re-send costs one entry for the life of the session: ~30 per
+            # unanswered form at the defaults, cleared on disconnect. That
+            # is why the interval floor is 10 s and the default 60 s.
+            if not done and rearm_seconds:
+                tasks.append(asyncio.ensure_future(event_call(payload)))
+    finally:
+        leftover = [t for t in tasks if not t.done()]
+        for task in leftover:
+            task.cancel()
+        if leftover:
+            await asyncio.gather(*leftover, return_exceptions=True)
 
 
 def _answer_text(value: Any) -> str:
@@ -1114,7 +1212,7 @@ def _on_tool_use(
     if agent:
         agent["tools"] += 1
         label = f"↳ {agent['label']} · {label}"
-    state.active_tools[tool_id] = {"label": label, "started": now}
+    state.active_tools[tool_id] = {"label": label, "started": now, "name": name}
     chunks: List[str] = []
     if inline_details:
         summary_text = f"🔧 {name}" + (f" · {preview}" if preview else "")
@@ -1170,12 +1268,23 @@ def _session_status(resumed: bool, history: List[Dict[str, Any]]) -> str:
     return "Session: new chat"
 
 
+def _only_ask_user(active_tools: Dict[str, Dict[str, Any]]) -> bool:
+    return bool(active_tools) and all(
+        t.get("name") == _ASK_USER_TOOL for t in active_tools.values()
+    )
+
+
 def _heartbeat_label(active_tools: Dict[str, Dict[str, Any]], now: float) -> Tuple[str, int]:
-    oldest = min(active_tools.values(), key=lambda t: t["started"])
+    # A form waiting on the user is not "running"; only the quiet-wait
+    # status may mention it, so the ticks describe the ordinary tools.
+    tools = [t for t in active_tools.values() if t.get("name") != _ASK_USER_TOOL]
+    if not tools:
+        tools = list(active_tools.values())
+    oldest = min(tools, key=lambda t: t["started"])
     elapsed = int(now - oldest["started"])
-    if len(active_tools) == 1:
+    if len(tools) == 1:
         return oldest["label"], elapsed
-    return f"{len(active_tools)} tools · longest {oldest['label']}", elapsed
+    return f"{len(tools)} tools · longest {oldest['label']}", elapsed
 
 
 def _context_from_usage(cu: Dict[str, Any]) -> str:
@@ -2196,7 +2305,9 @@ def _build_kb_mcp_server(
     return server, tool_names
 
 def _build_ask_user_mcp_server(
-    event_call: Optional[Callable], wait_minutes: int = _ASK_USER_WAIT_MINUTES
+    event_call: Optional[Callable],
+    wait_minutes: int = _ASK_USER_WAIT_MINUTES,
+    rearm_seconds: int = _ASK_USER_REARM_SECONDS,
 ):
     """Return (mcp_config, tool_names) for the ask_user tool. Registered even
     without an event_call: the tool then hands the questions back as markdown
@@ -2271,16 +2382,13 @@ def _build_ask_user_mcp_server(
             result = _no_ui_result(questions)
         else:
             payload = _user_input_payload(questions)
-            try:
-                output = await asyncio.wait_for(
-                    event_call(payload), _ask_user_wait_seconds(wait_minutes)
-                )
-            except asyncio.TimeoutError:
-                log.warning("ask_user form never answered within %s min", wait_minutes)
-                output = {"error": "Event call timed out: the form never answered."}
-            except Exception as exc:
-                log.warning("ask_user event_call failed: %s", exc)
-                output = {"error": f"{type(exc).__name__}: {exc}"}
+            output = await _ask_with_rearm(
+                event_call, payload,
+                _ask_user_wait_seconds(wait_minutes),
+                _ask_user_rearm_seconds(rearm_seconds),
+            )
+            if isinstance(output, dict) and output.get("error"):
+                log.warning("ask_user form not answered: %s", output["error"])
             result = _map_user_input_response(output, questions)
         return {
             "content": [
@@ -2728,6 +2836,19 @@ class Pipe:
                 "text and ends the turn. Open WebUI's "
                 "WEBSOCKET_EVENT_CALLER_TIMEOUT cuts the wait first if it is "
                 "shorter, with the same outcome."
+            ),
+        )
+        ASK_USER_REARM_SECONDS: int = Field(
+            default=_ASK_USER_REARM_SECONDS,
+            ge=0,
+            le=_ASK_USER_REARM_SECONDS_MAX,
+            description=(
+                "Re-send an unanswered ask_user form every N seconds "
+                "(10-600; 0 disables). The web client drops a form that "
+                "arrives while the chat is not open or the reply is not yet "
+                "in view, and never says so; the re-send is what puts it "
+                "back. A re-send resets a form the user is part-way through "
+                "answering, so keep this well above the time an answer takes."
             ),
         )
         SESSION_SEARCH: bool = Field(
@@ -3202,7 +3323,8 @@ class Pipe:
             mcp_servers["knowledge"] = kb_server
         if self.valves.ASK_USER:
             ask_server, ask_tool_names = _build_ask_user_mcp_server(
-                event_call, self.valves.ASK_USER_WAIT_MINUTES
+                event_call, self.valves.ASK_USER_WAIT_MINUTES,
+                self.valves.ASK_USER_REARM_SECONDS,
             )
             mcp_servers["ask-user"] = ask_server
             allowed_tools = allowed_tools + ask_tool_names
@@ -3339,15 +3461,30 @@ class Pipe:
         heartbeat_task: Optional[asyncio.Task] = None
         inline = self.valves.INLINE_TOOL_DETAILS
 
-        # While a tool runs, restate elapsed time every 2s so a 30s Bash call
-        # reads as progress rather than a hang.
+        # While a tool runs, restate elapsed time so a 30s Bash call reads as
+        # progress rather than a hang. Open WebUI 0.11 keeps every status
+        # event in the message's statusHistory, so the restating backs off
+        # as the tool runs on, and a form waiting on the user gets one line
+        # and then silence: the wait is theirs, not the tool's.
         async def _heartbeat() -> None:
+            last_tick = time.monotonic()
+            waiting_on_form = False
             try:
                 while state.active_tools:
                     await asyncio.sleep(2)
                     if not state.active_tools:
                         return
-                    label, elapsed = _heartbeat_label(state.active_tools, time.monotonic())
+                    now = time.monotonic()
+                    if _only_ask_user(state.active_tools):
+                        if not waiting_on_form:
+                            waiting_on_form = True
+                            await emit_status("⏳ Waiting for your answer to the form…")
+                        continue
+                    waiting_on_form = False
+                    label, elapsed = _heartbeat_label(state.active_tools, now)
+                    if now - last_tick < _heartbeat_interval(elapsed):
+                        continue
+                    last_tick = now
                     log.debug("heartbeat tick: %s · %ss", label, elapsed)
                     await emit_status(f"⏳ {label} · running {elapsed}s…")
             except asyncio.CancelledError:

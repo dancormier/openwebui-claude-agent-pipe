@@ -64,6 +64,14 @@ def _owui_usage(
     return out
 
 
+def _heartbeat_interval(elapsed_seconds: float) -> float:
+    if elapsed_seconds < 30:
+        return 2.0
+    if elapsed_seconds < 300:
+        return 15.0
+    return 60.0
+
+
 def _fmt_duration(ms: int) -> str:
     s = max(0, round(ms / 1000))
     if s < 60:
