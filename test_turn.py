@@ -115,6 +115,13 @@ check("heartbeat: multiple tools names count and oldest", label == "3 tools · l
 one = {"t9": {"label": "Read: a.txt", "started": 5.0}}
 check("heartbeat: single tool label", mod._heartbeat_label(one, 8.9) == ("Read: a.txt", 3))
 check("tool use: records the tool name for the form check", st.active_tools["t1"]["name"] == "Bash")
+mixed = {
+    "form": {"label": f"{mod._ASK_USER_TOOL}: pick one", "started": 0.0, "name": mod._ASK_USER_TOOL},
+    "sub": {"label": "Bash: ls", "started": 100.0, "name": "Bash"},
+}
+check("heartbeat: form excluded from the label and elapsed", mod._heartbeat_label(mixed, 110.0) == ("Bash: ls", 10), mod._heartbeat_label(mixed, 110.0))
+mixed["sub2"] = {"label": "Read: a", "started": 105.0, "name": "Read"}
+check("heartbeat: form excluded from the count", mod._heartbeat_label(mixed, 110.0) == ("2 tools · longest Bash: ls", 10), mod._heartbeat_label(mixed, 110.0))
 for elapsed, want in ((0, 2.0), (29.9, 2.0), (30, 15.0), (299, 15.0), (300, 60.0), (3600, 60.0)):
     check(f"heartbeat interval at {elapsed}s", mod._heartbeat_interval(elapsed) == want, mod._heartbeat_interval(elapsed))
 

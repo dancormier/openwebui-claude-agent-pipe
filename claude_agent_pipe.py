@@ -897,11 +897,20 @@ async def _ask_with_rearm(
             done, _ = await asyncio.wait(
                 pending, timeout=timeout, return_when=asyncio.FIRST_COMPLETED
             )
-            others_pending = any(not t.done() for t in tasks)
-            for task in done:
-                output = _task_output(task)
-                if _ask_output_settles(output, others_pending):
+            # Two sends can land in one batch; `done` is a set, so a stale
+            # timeout must never win over the answers sitting next to it.
+            outputs = [_task_output(t) for t in done]
+            for output in outputs:
+                if _ask_output_settles(output, True):
                     return output
+            if outputs and not any(not t.done() for t in tasks):
+                return outputs[0]
+            # Every cancelled send leaves its ack callback registered in
+            # python-socketio's manager until the client acks or disconnects
+            # (socketio/async_server.py `call`, base_manager.py), so each
+            # re-send costs one entry for the life of the session: ~30 per
+            # unanswered form at the defaults, cleared on disconnect. That
+            # is why the interval floor is 10 s and the default 60 s.
             if not done and rearm_seconds:
                 tasks.append(asyncio.ensure_future(event_call(payload)))
     finally:
@@ -1266,11 +1275,16 @@ def _only_ask_user(active_tools: Dict[str, Dict[str, Any]]) -> bool:
 
 
 def _heartbeat_label(active_tools: Dict[str, Dict[str, Any]], now: float) -> Tuple[str, int]:
-    oldest = min(active_tools.values(), key=lambda t: t["started"])
+    # A form waiting on the user is not "running"; only the quiet-wait
+    # status may mention it, so the ticks describe the ordinary tools.
+    tools = [t for t in active_tools.values() if t.get("name") != _ASK_USER_TOOL]
+    if not tools:
+        tools = list(active_tools.values())
+    oldest = min(tools, key=lambda t: t["started"])
     elapsed = int(now - oldest["started"])
-    if len(active_tools) == 1:
+    if len(tools) == 1:
         return oldest["label"], elapsed
-    return f"{len(active_tools)} tools · longest {oldest['label']}", elapsed
+    return f"{len(tools)} tools · longest {oldest['label']}", elapsed
 
 
 def _context_from_usage(cu: Dict[str, Any]) -> str:

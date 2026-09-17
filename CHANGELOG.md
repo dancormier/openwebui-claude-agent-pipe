@@ -16,6 +16,9 @@ comments and the pull requests that introduced them.
   that is the accepted cost of getting a dropped one back. Every send
   still in flight is cancelled once one settles, and a server-side
   "timed out" on an older send is ignored while a newer one is pending.
+  Each cancelled send leaves an ack callback in python-socketio's manager
+  until the client acks or disconnects (~30 per unanswered form at the
+  defaults), which is why the interval floor is 10 s.
 - The running-tool heartbeat backs off: every 2 s for the first 30 s,
   then 15 s, then 60 s after 5 minutes. Open WebUI 0.11 keeps every
   status event in the message's history with no dedupe, so an 8-minute

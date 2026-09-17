@@ -190,6 +190,38 @@ c = FakeClient([(0.02, {"error": "Event call timed out. The browser tab may be i
 r = run(c, rearm=0.01)
 check("server timeout on the first send is ignored while a re-send is pending", r == answered and c.sends >= 2, (r, c.sends))
 
+TIMED_OUT = {"error": "Event call timed out. The browser tab may be inactive or closed."}
+
+
+class GatedClient(FakeClient):
+    """Every send parks on one shared gate, so releasing it completes all of
+    them in the same loop pass and the same `asyncio.wait` batch."""
+
+    def __init__(self, script):
+        super().__init__(script)
+        self.gate = None
+
+    async def __call__(self, payload):
+        index = self.sends
+        self.sends += 1
+        await self.gate.wait()
+        return self.script[index]
+
+
+async def same_batch(client):
+    client.gate = asyncio.Event()
+    task = asyncio.ensure_future(mod._ask_with_rearm(client, PAYLOAD, 5.0, 0.01))
+    while client.sends < 2:
+        await asyncio.sleep(0.001)
+    client.gate.set()
+    return await task
+
+
+for order, script in (("timeout first", [TIMED_OUT, answered]), ("answers first", [answered, TIMED_OUT])):
+    c = GatedClient(script)
+    r = asyncio.run(same_batch(c))
+    check(f"same-batch completion, {order}: answers win over the stale timeout", r == answered and c.sends == 2, (r, c.sends))
+
 c = FakeClient([None])
 check("rearm disabled sends exactly once and expires as timed out", run(c, wait=0.1, rearm=0) == {"error": mod._ASK_USER_TIMED_OUT} and c.sends == 1 and c.cancelled == 1, (c.sends, c.cancelled))
 

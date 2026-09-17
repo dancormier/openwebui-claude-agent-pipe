@@ -281,11 +281,16 @@ def _only_ask_user(active_tools: Dict[str, Dict[str, Any]]) -> bool:
 
 
 def _heartbeat_label(active_tools: Dict[str, Dict[str, Any]], now: float) -> Tuple[str, int]:
-    oldest = min(active_tools.values(), key=lambda t: t["started"])
+    # A form waiting on the user is not "running"; only the quiet-wait
+    # status may mention it, so the ticks describe the ordinary tools.
+    tools = [t for t in active_tools.values() if t.get("name") != _ASK_USER_TOOL]
+    if not tools:
+        tools = list(active_tools.values())
+    oldest = min(tools, key=lambda t: t["started"])
     elapsed = int(now - oldest["started"])
-    if len(active_tools) == 1:
+    if len(tools) == 1:
         return oldest["label"], elapsed
-    return f"{len(active_tools)} tools · longest {oldest['label']}", elapsed
+    return f"{len(tools)} tools · longest {oldest['label']}", elapsed
 
 
 def _context_from_usage(cu: Dict[str, Any]) -> str:

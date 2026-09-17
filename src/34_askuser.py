@@ -195,11 +195,20 @@ async def _ask_with_rearm(
             done, _ = await asyncio.wait(
                 pending, timeout=timeout, return_when=asyncio.FIRST_COMPLETED
             )
-            others_pending = any(not t.done() for t in tasks)
-            for task in done:
-                output = _task_output(task)
-                if _ask_output_settles(output, others_pending):
+            # Two sends can land in one batch; `done` is a set, so a stale
+            # timeout must never win over the answers sitting next to it.
+            outputs = [_task_output(t) for t in done]
+            for output in outputs:
+                if _ask_output_settles(output, True):
                     return output
+            if outputs and not any(not t.done() for t in tasks):
+                return outputs[0]
+            # Every cancelled send leaves its ack callback registered in
+            # python-socketio's manager until the client acks or disconnects
+            # (socketio/async_server.py `call`, base_manager.py), so each
+            # re-send costs one entry for the life of the session: ~30 per
+            # unanswered form at the defaults, cleared on disconnect. That
+            # is why the interval floor is 10 s and the default 60 s.
             if not done and rearm_seconds:
                 tasks.append(asyncio.ensure_future(event_call(payload)))
     finally:
