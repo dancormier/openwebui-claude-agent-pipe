@@ -4,7 +4,7 @@ Patches on top of [tfriedel/openwebui-claude-code](https://github.com/tfriedel/o
 commit `5bbc1fc`, in the order they landed. Numbering matches the pipe's own
 comments and the pull requests that introduced them.
 
-## Unreleased
+## v0.3.2 (2026-09-17)
 
 - The `ask_user` form no longer expires on its own: the event carries no
   `timeout_ms`, so Open WebUI never starts the countdown that dismissed a
