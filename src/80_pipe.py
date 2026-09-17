@@ -223,6 +223,15 @@
                 "which the same incident did with 1,972 inline images."
             ),
         )
+        PUBLIC_BASE_URL: str = Field(
+            default="",
+            description=(
+                "Absolute origin for artifact links, e.g. "
+                "https://chat.example.com. Empty falls back to the WEBUI_URL "
+                "environment variable, then to relative URLs. Native clients "
+                "(Conduit) cannot resolve relative links."
+            ),
+        )
         SETTING_SOURCES: str = Field(
             default="",
             description=(
@@ -711,6 +720,7 @@
         if self.valves.SCAN_TMP_ARTIFACTS:
             scan_dirs.append(Path("/tmp"))
         artifact_snapshot = _snapshot_artifacts(scan_dirs)
+        artifact_base_url = _artifact_base_url(self.valves.PUBLIC_BASE_URL)
 
         state = _TurnState()
         heartbeat_task: Optional[asyncio.Task] = None
@@ -872,6 +882,7 @@
                             (__user__ or {}).get("id"),
                             self.valves.MAX_ARTIFACTS_PER_TURN,
                             self.valves.MAX_INLINE_IMAGES,
+                            artifact_base_url,
                         ):
                             yield chunk
                         if inflight is not None and inflight.superseded:

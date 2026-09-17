@@ -9,6 +9,7 @@ in-memory dict so the uploader runs without Open WebUI installed.
 """
 
 import asyncio
+import os
 import pathlib
 import sys
 import tempfile
@@ -27,6 +28,7 @@ if "pydantic" not in sys.modules:
     sys.modules["pydantic"] = _stub
 
 uploaded = []
+forms = []
 
 
 class _Storage:
@@ -44,6 +46,7 @@ class _Files:
 
     @staticmethod
     def insert_new_file(user_id, form):
+        forms.append(form)
         if _Files.mode == "async":
             async def _later():
                 return form
@@ -75,8 +78,8 @@ exec(compile(head, str(PIPE), "exec"), mod.__dict__)
 fails = []
 
 
-def inline(*args):
-    return asyncio.run(mod._inline_new_artifacts(*args))
+def inline(*args, **kwargs):
+    return asyncio.run(mod._inline_new_artifacts(*args, **kwargs))
 
 
 def check(name, cond, detail=""):
@@ -188,6 +191,58 @@ with tempfile.TemporaryDirectory() as tmp:
     finally:
         _Files.mode = "sync"
     check("rejected row is not linked", "![" not in text and "not linkable" in text, text)
+
+# ---- links are relative by default, absolute with a base URL ----
+with tempfile.TemporaryDirectory() as tmp:
+    root = pathlib.Path(tmp)
+    before = mod._snapshot_artifacts([root])
+    touch(root, "chart.png")
+    touch(root, "report.md")
+    text = "".join(inline([root], before, "user"))
+    check("relative image link without base", "![chart.png](/api/v1/files/" in text, text)
+    check("relative doc link without base", "[report.md](/api/v1/files/" in text, text)
+    text = "".join(inline([root], before, "user", base_url="https://chat.example.com"))
+    check("absolute image link with base", "![chart.png](https://chat.example.com/api/v1/files/" in text, text)
+    check("absolute doc link with base", "[report.md](https://chat.example.com/api/v1/files/" in text, text)
+    check("no relative links remain", "](/api/v1/files/" not in text, text)
+
+# ---- base URL resolution: valve, then WEBUI_URL, then relative ----
+_saved = os.environ.pop("WEBUI_URL", None)
+try:
+    check("no valve, no env: relative", mod._artifact_base_url("") == "")
+    os.environ["WEBUI_URL"] = "https://env.example.com/"
+    check("env fallback, trailing slash stripped", mod._artifact_base_url("") == "https://env.example.com")
+    check("valve wins over env", mod._artifact_base_url(" https://valve.example.com/ ") == "https://valve.example.com")
+finally:
+    if _saved is None:
+        os.environ.pop("WEBUI_URL", None)
+    else:
+        os.environ["WEBUI_URL"] = _saved
+
+# ---- text deliverables are recorded text/plain so the content route serves them inline ----
+with tempfile.TemporaryDirectory() as tmp:
+    root = pathlib.Path(tmp)
+    before = mod._snapshot_artifacts([root])
+    for name in ("a.md", "b.txt", "c.yaml", "d.yml", "e.json", "f.csv", "g.png", "h.pdf"):
+        touch(root, name)
+    forms.clear()
+    inline([root], before, "user")
+    types = {f["filename"]: f["meta"]["content_type"] for f in forms}
+    for name in ("a.md", "b.txt", "c.yaml", "d.yml", "e.json"):
+        check(f"{name} is text/plain", types.get(name) == "text/plain", types.get(name))
+    check("csv keeps its own type", types.get("f.csv") == "text/csv", types.get("f.csv"))
+    check("png keeps its own type", types.get("g.png") == "image/png", types.get("g.png"))
+    check("pdf keeps its own type", types.get("h.pdf") == "application/pdf", types.get("h.pdf"))
+
+# ---- pasted workdir paths rewrite to served URLs ----
+rw = mod._rewrite_workdir_paths
+m = {"/w/c/report.md": "U1", "/w/c/report.md.bak": "U2", "/w/c/img.png": "U3"}
+check("link target rewritten, label kept", rw("see [the report](/w/c/report.md) now", m) == "see [the report](U1) now")
+check("bare path becomes a named link", rw("saved to /w/c/img.png.", m) == "saved to [img.png](U3).")
+check("unrelated path untouched", rw("[x](/w/c/other.md) and /w/c/report.md5", m) == "[x](/w/c/other.md) and /w/c/report.md5")
+check("prefix path handled longest-first", rw("[a](/w/c/report.md.bak) [b](/w/c/report.md)", m) == "[a](U2) [b](U1)")
+check("unknown longer suffix untouched", rw("/w/c/report.md.old", m) == "/w/c/report.md.old")
+check("no mapping is a no-op", rw("plain text", {}) == "plain text")
 
 print()
 if fails:

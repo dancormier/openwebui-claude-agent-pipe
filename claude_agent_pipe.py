@@ -1518,6 +1518,12 @@ _DOWNLOAD_EXTENSIONS = {
     ".zip",
 }
 _ARTIFACT_EXTENSIONS = _IMAGE_EXTENSIONS | _DOWNLOAD_EXTENSIONS
+# Open WebUI's /api/v1/files/{id}/content route serves only text/plain and
+# PDF inline; every other content type gets Content-Disposition: attachment,
+# so a Markdown or YAML deliverable forced a download instead of opening in
+# the tab. Python's mimetypes has no entry for .md/.yaml at all (they fell to
+# application/octet-stream), and application/json is not in the inline set.
+_INLINE_TEXT_EXTENSIONS = {".md", ".txt", ".yaml", ".yml", ".json"}
 # Safety cap to avoid uploading runaway files. Uploaded artifacts are served
 # via OpenWebUI's file endpoint, so they don't bloat the chat history even
 # when large — this is only a "don't accidentally ship a DVD ISO" guard.
@@ -1564,6 +1570,38 @@ def _iter_artifact_files(scan_dirs: List[Path]) -> "list[Path]":
     return seen
 
 
+def _artifact_base_url(valve: str) -> str:
+    """Origin to prefix artifact URLs with. Native clients (Conduit) render
+    the message with no page origin, so a relative `/api/v1/files/...` link
+    has nowhere to resolve; the web UI is fine either way."""
+    base = (valve or "").strip() or os.environ.get("WEBUI_URL", "")
+    return base.strip().rstrip("/")
+
+
+def _rewrite_workdir_paths(text: str, path_to_url: Dict[str, str]) -> str:
+    """Swap absolute workdir paths the agent pasted into its prose for the
+    served URL of the uploaded copy. A link target keeps its label; a bare
+    path becomes a link named after the file. Longest path first so a file
+    whose path is a prefix of another's (`a.md` / `a.md.bak`) is not
+    half-rewritten; the lookahead keeps `a.md` from matching inside an
+    unknown `a.md5` or `a.md.old`, while a sentence-ending period still
+    counts as a boundary."""
+    for path in sorted(path_to_url, key=len, reverse=True):
+        url = path_to_url[path]
+        name = Path(path).name
+        pattern = re.compile(
+            r"(\]\()?" + re.escape(path) + r"(?![\w/-])(?!\.\w)"
+        )
+
+        def _sub(match: "re.Match[str]", url: str = url, name: str = name) -> str:
+            if match.group(1):
+                return match.group(1) + url
+            return f"[{name}]({url})"
+
+        text = pattern.sub(_sub, text)
+    return text
+
+
 def _snapshot_artifacts(scan_dirs: List[Path]) -> Dict[str, int]:
     snapshot: Dict[str, int] = {}
     for path in _iter_artifact_files(scan_dirs):
@@ -1580,6 +1618,7 @@ async def _inline_new_artifacts(
     user_id: Optional[str],
     max_artifacts_per_turn: int = _MAX_ARTIFACTS_PER_TURN,
     max_inline_images: int = _MAX_INLINE_IMAGES,
+    base_url: str = "",
 ) -> List[str]:
     """Upload artifacts new or modified since `before` to OpenWebUI's file
     store, and return markdown referencing the served URLs.
@@ -1589,10 +1628,11 @@ async def _inline_new_artifacts(
     the address bar and stall when clicked. They'd also persist in chat
     history, bloating the DB on every turn.
 
-    URL shape: `/api/v1/files/{id}/content` for every artifact.
+    URL shape: `{base_url}/api/v1/files/{id}/content` for every artifact
+    (`base_url` empty → relative, which only the web UI can resolve).
       - Images: loaded by the markdown `<img>` tag → display inline.
-      - PDFs: the route emits `Content-Disposition: inline` → browser opens
-        them in its native PDF viewer (new tab).
+      - PDFs and `text/plain` (see _INLINE_TEXT_EXTENSIONS): the route emits
+        `Content-Disposition: inline` → browser opens them in a new tab.
       - Everything else: the route falls back to `attachment`, so clicking
         triggers a download (fine for CSV/XLSX/ZIP — they have no sensible
         inline view anyway).
@@ -1634,9 +1674,12 @@ async def _inline_new_artifacts(
 
         ext = path.suffix.lower()
         is_image = ext in _IMAGE_EXTENSIONS
-        mime = mimetypes.guess_type(path.name)[0] or (
-            "image/png" if is_image else "application/octet-stream"
-        )
+        if ext in _INLINE_TEXT_EXTENSIONS:
+            mime = "text/plain"
+        else:
+            mime = mimetypes.guess_type(path.name)[0] or (
+                "image/png" if is_image else "application/octet-stream"
+            )
 
         file_id = str(uuid.uuid4())
         storage_filename = f"{file_id}_{path.name}"
@@ -1679,14 +1722,13 @@ async def _inline_new_artifacts(
             chunks.append(f"\n\n_(Saved but not linkable: {path.name}: file row rejected)_\n")
             continue
 
+        url = f"{base_url}/api/v1/files/{file_id}/content"
         if is_image and inline_images < max_inline_images:
             inline_images += 1
-            chunks.append(f"\n\n![{path.name}](/api/v1/files/{file_id}/content)\n")
+            chunks.append(f"\n\n![{path.name}]({url})\n")
         else:
             kib = size // 1024
-            doc_links.append(
-                f"[{path.name}](/api/v1/files/{file_id}/content) ({kib} KiB)"
-            )
+            doc_links.append(f"[{path.name}]({url}) ({kib} KiB)")
     # One compact paragraph for all document links instead of a block per
     # file: multi-file turns were eating a screenful of chat. Not a <details>
     # toggle — Conduit renders raw HTML literally.
@@ -2846,6 +2888,15 @@ class Pipe:
                 "which the same incident did with 1,972 inline images."
             ),
         )
+        PUBLIC_BASE_URL: str = Field(
+            default="",
+            description=(
+                "Absolute origin for artifact links, e.g. "
+                "https://chat.example.com. Empty falls back to the WEBUI_URL "
+                "environment variable, then to relative URLs. Native clients "
+                "(Conduit) cannot resolve relative links."
+            ),
+        )
         SETTING_SOURCES: str = Field(
             default="",
             description=(
@@ -3334,6 +3385,7 @@ class Pipe:
         if self.valves.SCAN_TMP_ARTIFACTS:
             scan_dirs.append(Path("/tmp"))
         artifact_snapshot = _snapshot_artifacts(scan_dirs)
+        artifact_base_url = _artifact_base_url(self.valves.PUBLIC_BASE_URL)
 
         state = _TurnState()
         heartbeat_task: Optional[asyncio.Task] = None
@@ -3495,6 +3547,7 @@ class Pipe:
                             (__user__ or {}).get("id"),
                             self.valves.MAX_ARTIFACTS_PER_TURN,
                             self.valves.MAX_INLINE_IMAGES,
+                            artifact_base_url,
                         ):
                             yield chunk
                         if inflight is not None and inflight.superseded:

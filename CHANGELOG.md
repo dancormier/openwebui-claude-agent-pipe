@@ -4,6 +4,22 @@ Patches on top of [tfriedel/openwebui-claude-code](https://github.com/tfriedel/o
 commit `5bbc1fc`, in the order they landed. Numbering matches the pipe's own
 comments and the pull requests that introduced them.
 
+## Unreleased
+
+- Artifact links can be absolute: the new `PUBLIC_BASE_URL` valve (falling
+  back to Open WebUI's `WEBUI_URL` environment variable) prefixes every
+  uploaded-file link, so native clients such as Conduit, which render the
+  message with no page origin, can open them. Empty keeps today's relative
+  links.
+- Markdown, text, YAML and JSON deliverables are recorded as `text/plain`,
+  the one text type Open WebUI's file content route serves inline; they
+  open in a tab instead of forcing a download.
+- New pure helper `_rewrite_workdir_paths` maps absolute workdir paths the
+  agent pasted into its prose to the uploaded file's URL. Not wired into the
+  turn yet: Open WebUI 0.11 does handle a `replace` event, but its final
+  `chat:completion` carries the server-side `output` items and the client
+  rebuilds the message text from those, undoing the replacement.
+
 ## v0.3.2 (2026-09-17)
 
 - The `ask_user` form no longer expires on its own: the event carries no
