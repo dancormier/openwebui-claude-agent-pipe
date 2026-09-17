@@ -6,6 +6,18 @@ comments and the pull requests that introduced them.
 
 ## Unreleased
 
+- Artifact links can be absolute: the new `PUBLIC_BASE_URL` valve (falling
+  back to Open WebUI's `WEBUI_URL` environment variable) prefixes every
+  uploaded-file link, so native clients such as Conduit, which render the
+  message with no page origin, can open them. Empty keeps today's relative
+  links. Inline images only load same-origin in practice (the auth cookie
+  is SameSite=Lax), so set it to the origin the user actually browses.
+- Markdown, text, YAML and JSON deliverables are recorded as `text/plain`,
+  the one text type Open WebUI's file content route serves inline; they
+  open in a tab instead of forcing a download.
+- The system prompt now tells the agent that workdir files are uploaded
+  and linked automatically, and never to link one by its filesystem path,
+  which the client cannot open.
 - An unanswered `ask_user` form is re-sent every `ASK_USER_REARM_SECONDS`
   (new valve, default 60, 0 disables) until it is answered, cancelled, or
   `ASK_USER_WAIT_MINUTES` runs out. The web client only renders the form
