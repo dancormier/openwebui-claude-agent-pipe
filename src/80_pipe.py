@@ -107,6 +107,19 @@
                 "shorter, with the same outcome."
             ),
         )
+        ASK_USER_REARM_SECONDS: int = Field(
+            default=_ASK_USER_REARM_SECONDS,
+            ge=0,
+            le=_ASK_USER_REARM_SECONDS_MAX,
+            description=(
+                "Re-send an unanswered ask_user form every N seconds "
+                "(10-600; 0 disables). The web client drops a form that "
+                "arrives while the chat is not open or the reply is not yet "
+                "in view, and never says so; the re-send is what puts it "
+                "back. A re-send resets a form the user is part-way through "
+                "answering, so keep this well above the time an answer takes."
+            ),
+        )
         SESSION_SEARCH: bool = Field(
             default=True,
             description=(
@@ -588,7 +601,8 @@
             mcp_servers["knowledge"] = kb_server
         if self.valves.ASK_USER:
             ask_server, ask_tool_names = _build_ask_user_mcp_server(
-                event_call, self.valves.ASK_USER_WAIT_MINUTES
+                event_call, self.valves.ASK_USER_WAIT_MINUTES,
+                self.valves.ASK_USER_REARM_SECONDS,
             )
             mcp_servers["ask-user"] = ask_server
             allowed_tools = allowed_tools + ask_tool_names
@@ -727,15 +741,30 @@
         heartbeat_task: Optional[asyncio.Task] = None
         inline = self.valves.INLINE_TOOL_DETAILS
 
-        # While a tool runs, restate elapsed time every 2s so a 30s Bash call
-        # reads as progress rather than a hang.
+        # While a tool runs, restate elapsed time so a 30s Bash call reads as
+        # progress rather than a hang. Open WebUI 0.11 keeps every status
+        # event in the message's statusHistory, so the restating backs off
+        # as the tool runs on, and a form waiting on the user gets one line
+        # and then silence: the wait is theirs, not the tool's.
         async def _heartbeat() -> None:
+            last_tick = time.monotonic()
+            waiting_on_form = False
             try:
                 while state.active_tools:
                     await asyncio.sleep(2)
                     if not state.active_tools:
                         return
-                    label, elapsed = _heartbeat_label(state.active_tools, time.monotonic())
+                    now = time.monotonic()
+                    if _only_ask_user(state.active_tools):
+                        if not waiting_on_form:
+                            waiting_on_form = True
+                            await emit_status("⏳ Waiting for your answer to the form…")
+                        continue
+                    waiting_on_form = False
+                    label, elapsed = _heartbeat_label(state.active_tools, now)
+                    if now - last_tick < _heartbeat_interval(elapsed):
+                        continue
+                    last_tick = now
                     log.debug("heartbeat tick: %s · %ss", label, elapsed)
                     await emit_status(f"⏳ {label} · running {elapsed}s…")
             except asyncio.CancelledError:
