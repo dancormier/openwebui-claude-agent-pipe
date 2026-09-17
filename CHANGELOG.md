@@ -4,6 +4,19 @@ Patches on top of [tfriedel/openwebui-claude-code](https://github.com/tfriedel/o
 commit `5bbc1fc`, in the order they landed. Numbering matches the pipe's own
 comments and the pull requests that introduced them.
 
+## Unreleased
+
+- The `ask_user` form no longer expires on its own: the event carries no
+  `timeout_ms`, so Open WebUI never starts the countdown that dismissed a
+  form mid-answer. The turn's wait for an answer is the new
+  `ASK_USER_WAIT_MINUTES` valve (default 30, was a fixed 4 minutes); it
+  only ends a wait for a form that can no longer answer (chat switched,
+  page reloaded). When that happens the tool result is `lost` and the
+  agent repeats the questions as text and ends the turn, instead of
+  proceeding on an assumption. Cancel still means "decide for me".
+  Set Open WebUI's `WEBSOCKET_EVENT_CALLER_TIMEOUT` at least as high as
+  the valve, or the server cuts the wait first (same outcome, sooner).
+
 ## v0.3.1 (2026-09-15)
 
 - `REMOTE_MCP_SERVERS` valve: attach hosted MCP servers (Linear, GitHub,

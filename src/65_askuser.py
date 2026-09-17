@@ -1,6 +1,6 @@
 
 def _build_ask_user_mcp_server(
-    event_call: Optional[Callable], timeout_ms: int = _ASK_USER_TIMEOUT_MS
+    event_call: Optional[Callable], wait_minutes: int = _ASK_USER_WAIT_MINUTES
 ):
     """Return (mcp_config, tool_names) for the ask_user tool. Registered even
     without an event_call: the tool then hands the questions back as markdown
@@ -74,13 +74,13 @@ def _build_ask_user_mcp_server(
         if event_call is None:
             result = _no_ui_result(questions)
         else:
-            payload = _user_input_payload(questions, timeout_ms)
+            payload = _user_input_payload(questions)
             try:
                 output = await asyncio.wait_for(
-                    event_call(payload), _ask_user_wait_seconds(payload)
+                    event_call(payload), _ask_user_wait_seconds(wait_minutes)
                 )
             except asyncio.TimeoutError:
-                log.warning("ask_user form timed out with no reply")
+                log.warning("ask_user form never answered within %s min", wait_minutes)
                 output = {"error": "Event call timed out: the form never answered."}
             except Exception as exc:
                 log.warning("ask_user event_call failed: %s", exc)
@@ -114,9 +114,9 @@ _ASK_USER_PROMPT = (
     "but when you do ask, ask through the tool. One exception: a "
     "confirmation the rules require before a risky action stays a plain "
     "text question that ends the turn and waits for an explicit yes. If the "
-    "tool result's status is `no_ui`, put its `ask_in_reply` text in your "
-    "reply verbatim and end the turn; the next user message carries the "
-    "answers. If the status is `unanswered`, proceed on your best assumption "
-    "and say which you took."
+    "tool result's status is `no_ui` or `lost`, put its `ask_in_reply` text "
+    "in your reply verbatim and end the turn; the next user message carries "
+    "the answers. If the status is `unanswered`, the user cancelled the form: "
+    "proceed on your best assumption and say which you took."
 )
 

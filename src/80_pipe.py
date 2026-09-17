@@ -93,6 +93,20 @@
                 "answer in the next message instead."
             ),
         )
+        ASK_USER_WAIT_MINUTES: int = Field(
+            default=_ASK_USER_WAIT_MINUTES,
+            ge=1,
+            le=_ASK_USER_WAIT_MINUTES_MAX,
+            description=(
+                "How long a turn waits for an ask_user form (1-240 minutes). "
+                "The form itself never expires; this only ends the wait for a "
+                "form that can no longer answer (the chat was switched or "
+                "reloaded), after which the agent repeats the questions as "
+                "text and ends the turn. Open WebUI's "
+                "WEBSOCKET_EVENT_CALLER_TIMEOUT cuts the wait first if it is "
+                "shorter, with the same outcome."
+            ),
+        )
         SESSION_SEARCH: bool = Field(
             default=True,
             description=(
@@ -564,7 +578,9 @@
         if kb_server is not None:
             mcp_servers["knowledge"] = kb_server
         if self.valves.ASK_USER:
-            ask_server, ask_tool_names = _build_ask_user_mcp_server(event_call)
+            ask_server, ask_tool_names = _build_ask_user_mcp_server(
+                event_call, self.valves.ASK_USER_WAIT_MINUTES
+            )
             mcp_servers["ask-user"] = ask_server
             allowed_tools = allowed_tools + ask_tool_names
         chats_server = None
