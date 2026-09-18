@@ -4,6 +4,21 @@ Patches on top of [tfriedel/openwebui-claude-code](https://github.com/tfriedel/o
 commit `5bbc1fc`, in the order they landed. Numbering matches the pipe's own
 comments and the pull requests that introduced them.
 
+## Unreleased
+
+- The `ask_user` form now renders in Conduit (v4.1.5 and later), whose
+  parser is stricter than the web client's: at most three questions per
+  call (was four), and every option carries a description (the label
+  stands in when the agent gives none). Conduit acks the previous send with
+  a cancel whenever a re-send replaces its form, which used to end the wait
+  as unanswered after one interval; a cancel from anything but the latest
+  send is now ignored. `ASK_USER_REARM_SECONDS` caps at 110 s (was 600)
+  so a re-send lands before Conduit's own 2-minute form expiry; pydantic
+  rejects a stored value above the ceiling, so lower the valve to 110 or
+  less before deploying if it was raised. A question with no usable choice
+  (zero or one option; a lone option is dropped) is free text, and Conduit,
+  which has no form for those, still gets them asked in text as before.
+
 ## v0.3.4 (2026-09-18)
 
 - An `ask_user` form now goes to every live socket session of the user, on

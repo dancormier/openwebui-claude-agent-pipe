@@ -2,7 +2,7 @@
 # ask_user: the pure half. Normalizes the agent's question list into the
 # payload Open WebUI's `request:user_input` event expects (its own builtin
 # ask_user in open_webui/tools/builtin.py sets the field limits), renders the
-# same questions as markdown for clients with no form (Conduit, API callers,
+# same questions as markdown for clients with no form (API callers,
 # anything without a socket session), and maps the form's reply into the
 # tool result. No SDK or Open WebUI imports so the head-slice suites reach it.
 # Open WebUI's `__event_call__` targets the one sid that sent the message,
@@ -11,7 +11,7 @@
 # ---------------------------------------------------------------------------
 
 _ASK_USER_TOOL = "mcp__ask-user__ask_user"
-_ASK_USER_MAX_QUESTIONS = 4
+_ASK_USER_MAX_QUESTIONS = 3
 _ASK_USER_MAX_OPTIONS = 3
 # The event carries no `timeout_ms`: Open WebUI 0.11.3 starts the form's
 # countdown only for a positive number, and its expiry is the same cancel
@@ -32,7 +32,8 @@ _ASK_USER_WAIT_MINUTES_MAX = 240
 # the form first fired gets it on the next re-arm.
 _ASK_USER_REARM_SECONDS = 60
 _ASK_USER_REARM_SECONDS_MIN = 10
-_ASK_USER_REARM_SECONDS_MAX = 600
+# Conduit expires a form at 120 s on its own; a re-send replaces it first.
+_ASK_USER_REARM_SECONDS_MAX = 110
 _ASK_USER_TIMED_OUT = "Event call timed out: the form never answered."
 _ASK_USER_UNANSWERED_INSTRUCTION = (
     "The user did not answer. Proceed on your best assumption and say "
@@ -80,12 +81,14 @@ def _normalize_questions(raw: Any) -> List[Dict[str, Any]]:
             label = str(opt.get("label") or "").strip()[:80]
             if not label:
                 raise ValueError(f"question {index}: each option needs a label")
-            norm_options.append(
-                {
-                    "label": label,
-                    "description": str(opt.get("description") or "").strip()[:240],
-                }
-            )
+            # Conduit rejects the whole form when an option has an empty
+            # description; the label is the least wrong thing to show there.
+            description = str(opt.get("description") or "").strip()[:240]
+            norm_options.append({"label": label, "description": description or label})
+        # Conduit rejects the whole form when any question has one option,
+        # and one option is no choice anyway: the text field takes over.
+        if len(norm_options) < 2:
+            norm_options = []
         qid = str(q.get("id") or f"q{index}").strip()[:64]
         if qid in seen:
             raise ValueError(f"duplicate question id: {qid}")
@@ -112,7 +115,8 @@ def _render_questions_markdown(questions: List[Dict[str, Any]]) -> str:
     for n, q in enumerate(questions, 1):
         lines.append(f"{n}. **{q['header']}** — {q['question']}")
         for letter, opt in zip("abc", q["options"]):
-            desc = f" — {opt['description']}" if opt["description"] else ""
+            desc = opt["description"]
+            desc = f" — {desc}" if desc and desc != opt["label"] else ""
             lines.append(f"   - ({letter}) {opt['label']}{desc}")
         if q["allow_other"]:
             lines.append(
@@ -165,6 +169,14 @@ def _ask_output_settles(output: Any, others_pending: bool) -> bool:
     return True
 
 
+def _ask_output_answered(output: Any) -> bool:
+    return isinstance(output, dict) and isinstance(output.get("answers"), dict) and bool(output["answers"])
+
+
+def _ask_output_cancelled(output: Any) -> bool:
+    return isinstance(output, dict) and output.get("status") == "cancelled"
+
+
 def _task_output(task: "asyncio.Task") -> Any:
     try:
         return task.result()
@@ -202,12 +214,21 @@ async def _ask_with_rearm(
             )
             # Two sends can land in one batch; `done` is a set, so a stale
             # timeout must never win over the answers sitting next to it.
-            outputs = [_task_output(t) for t in done]
+            # Conduit acks the old call with `cancelled` when a re-send
+            # replaces its form, so a cancel from anything but the latest
+            # send is the client swapping forms, not the user declining.
+            done_in_order = sorted(done, key=tasks.index)
+            outputs = [_task_output(t) for t in done_in_order]
             for output in outputs:
+                if _ask_output_answered(output):
+                    return output
+            for task, output in zip(done_in_order, outputs):
+                if _ask_output_cancelled(output) and task is not tasks[-1]:
+                    continue
                 if _ask_output_settles(output, True):
                     return output
             if outputs and not any(not t.done() for t in tasks):
-                return outputs[0]
+                return _task_output(tasks[-1])
             # Every cancelled send leaves its ack callback registered in
             # python-socketio's manager until the client acks or disconnects
             # (socketio/async_server.py `call`, base_manager.py), so each
@@ -231,8 +252,9 @@ async def _fan_out_call(
 ) -> Any:
     """Send one event to every sid at once and return the first reply that
     is not an error. An error from the originating sid is final: a client
-    with no form (Conduit) acks the event with an error at once, and the
-    turn must fall through to asking in text instead of waiting on tabs
+    that rejects the payload (Conduit, for a free-text-only question) acks
+    the event with an error at once, and the turn must fall through to
+    asking in text instead of waiting on tabs
     that were never looking. The same error from any other sid says nothing
     about the one the user is typing in, so it is ignored while others
     pend; all-failed returns the origin's error, else the first in sid
@@ -291,9 +313,9 @@ def _map_user_input_response(
     unmounted before it could answer (the form itself never expires) →
     `lost`, with the questions rendered for the reply. Any other error
     means the form never reached them — a client that holds a socket
-    session but has no form (Conduit answers the event with "Invalid user
-    input request.", verified 2026-09-02), or a dropped session — so the
-    questions fall through to the no-form path."""
+    session but rejects the payload (Conduit answers a free-text-only
+    question with "Invalid user input request.", verified 2026-09-18), or
+    a dropped session — so the questions fall through to the no-form path."""
     if not isinstance(output, dict):
         return {"status": "unanswered", "reason": "no response",
                 "instruction": _ASK_USER_UNANSWERED_INSTRUCTION}

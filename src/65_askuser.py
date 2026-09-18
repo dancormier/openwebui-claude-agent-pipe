@@ -64,7 +64,7 @@ def _build_ask_user_mcp_server(
     @tool(
         "ask_user",
         (
-            "Ask the user 1-4 questions and get the answers back in this "
+            "Ask the user 1-3 questions and get the answers back in this "
             "same turn. Call this whenever you would otherwise end your "
             "reply by asking the user something: a missing detail, a choice "
             "between approaches, a preference. Bundle every open question "
@@ -100,9 +100,16 @@ def _build_ask_user_mcp_server(
                                     "type": "object",
                                     "properties": {
                                         "label": {"type": "string"},
-                                        "description": {"type": "string"},
+                                        "description": {
+                                            "type": "string",
+                                            "description": (
+                                                "One line: your recommendation "
+                                                "and its reason, or what picking "
+                                                "this means"
+                                            ),
+                                        },
                                     },
-                                    "required": ["label"],
+                                    "required": ["label", "description"],
                                 },
                             },
                             "allow_other": {
@@ -157,7 +164,7 @@ _ASK_USER_PROMPT = (
     "a preference - call the `ask_user` tool instead of writing the question "
     "as text. It shows a multiple-choice form and returns the answers in the "
     "same turn, so you can finish the work without another round trip. "
-    "Bundle every open question into one call: at most 4 questions; 2-3 "
+    "Bundle every open question into one call: at most 3 questions; 2-3 "
     "options for a choice, with your recommendation and its reason in that "
     "option's description, or no options for an open-ended detail like a "
     "name or a time, which gives the user a text field. When the stakes are "

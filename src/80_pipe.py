@@ -113,14 +113,15 @@
             le=_ASK_USER_REARM_SECONDS_MAX,
             description=(
                 "Re-send an unanswered ask_user form every N seconds "
-                "(10-600; 0 disables). Each send goes to every live session "
+                "(10-110; 0 disables). Each send goes to every live session "
                 "of the user, so a tab or device opened after the form "
                 "fired gets it on the next re-send. The web client drops a "
                 "form that arrives while the chat is not open or the reply "
                 "is not yet in view, and never says so; the re-send is what "
                 "puts it back. A re-send resets a form the user is part-way "
                 "through answering, so keep this well above the time an "
-                "answer takes."
+                "answer takes. The ceiling keeps a re-send ahead of Conduit's "
+                "2-minute form expiry."
             ),
         )
         SESSION_SEARCH: bool = Field(
