@@ -231,6 +231,116 @@ check("total wait expiry returns the timed-out shape", r == {"error": mod._ASK_U
 check("expiry cancels every outstanding send", c.sends >= 2 and c.cancelled == c.sends, (c.sends, c.cancelled))
 check("expired wait maps to lost", mod._map_user_input_response(r, norm)["status"] == "lost")
 
+
+# ---- fan-out ----
+class FakeSessions:
+    """Per-sid scripts in the FakeClient shape: a value, an exception, a
+    (delay, value) tuple, or None (never answers). `sids` may be a list of
+    lists to change what each list_sids() call returns."""
+
+    def __init__(self, sids, scripts):
+        self.sids = sids
+        self.scripts = scripts
+        self.calls = 0
+        self.sent = []
+        self.cancelled = []
+
+    def list_sids(self):
+        self.calls += 1
+        if self.sids and isinstance(self.sids[0], list):
+            return list(self.sids[min(self.calls - 1, len(self.sids) - 1)])
+        return list(self.sids)
+
+    async def send_to(self, sid, payload):
+        self.sent.append((sid, payload))
+        outcome = self.scripts.get(sid)
+        try:
+            if outcome is None:
+                await asyncio.sleep(3600)
+            if isinstance(outcome, Exception):
+                raise outcome
+            if isinstance(outcome, tuple):
+                delay, value = outcome
+                await asyncio.sleep(delay)
+                return value
+            return outcome
+        except asyncio.CancelledError:
+            self.cancelled.append(sid)
+            raise
+
+
+def fan(sessions, origin=None):
+    return asyncio.run(mod._fan_out_call(sessions.list_sids, sessions.send_to, PAYLOAD, origin))
+
+
+s = FakeSessions(["a", "b"], {"a": None, "b": (0.01, answered)})
+r = fan(s)
+check("fan-out: second sid answers, first send cancelled", r == answered and s.cancelled == ["a"], (r, s.cancelled))
+check("fan-out: every sid was sent the payload", sorted(sid for sid, _ in s.sent) == ["a", "b"] and all(p is PAYLOAD for _, p in s.sent))
+
+s = FakeSessions(["a", "b"], {"a": {"error": "Client session disconnected."}, "b": (0.02, answered)})
+r = fan(s)
+check("fan-out: dead sid ignored while another is pending", r == answered, r)
+
+s = FakeSessions(["a", "b"], {"a": RuntimeError("boom"), "b": (0.01, TIMED_OUT)})
+r = fan(s)
+check("fan-out: all failed returns the first sid's error, no hang", r == {"error": "RuntimeError: boom"}, r)
+
+s = FakeSessions([], {})
+try:
+    asyncio.run(asyncio.wait_for(mod._fan_out_call(s.list_sids, s.send_to, PAYLOAD), 0.05))
+    r = "returned"
+except asyncio.TimeoutError:
+    r = "timeout"
+check("fan-out: no sids parks until cancelled, nothing sent", r == "timeout" and s.sent == [], (r, s.sent))
+
+s = FakeSessions([[], ["b"]], {"b": (0.01, answered)})
+r = asyncio.run(mod._ask_with_rearm(
+    lambda payload: mod._fan_out_call(s.list_sids, s.send_to, payload), PAYLOAD, 5.0, 0.01,
+))
+check("fan-out under rearm: no sids at first, a session that appears later answers", r == answered and s.calls >= 2, (r, s.calls))
+
+NO_FORM = {"error": "Invalid user input request."}
+s = FakeSessions(["origin", "tab"], {"origin": NO_FORM, "tab": None})
+r = fan(s, origin="origin")
+check("fan-out: origin's no-form error settles at once, other send cancelled", r == NO_FORM and s.cancelled == ["tab"], (r, s.cancelled))
+
+s = FakeSessions(["origin", "app", "tab"], {"origin": None, "app": NO_FORM, "tab": (0.02, answered)})
+r = fan(s, origin="origin")
+check("fan-out: non-origin error ignored, later answer wins", r == answered, r)
+
+s = FakeSessions(["a", "origin"], {"a": RuntimeError("boom"), "origin": (0.01, TIMED_OUT)})
+r = fan(s, origin="origin")
+check("fan-out: all failed with an origin returns the origin's error", r == TIMED_OUT, r)
+
+s = FakeSessions(["a", "b", "c"], {"a": None, "b": (0.01, {"status": "cancelled"}), "c": None})
+r = fan(s)
+check("fan-out: cancel settles and cancels the rest", r == {"status": "cancelled"} and sorted(s.cancelled) == ["a", "c"], (r, s.cancelled))
+
+s = FakeSessions([["a"], ["a", "b"]], {"a": None, "b": (0.01, answered)})
+r = asyncio.run(mod._ask_with_rearm(
+    lambda payload: mod._fan_out_call(s.list_sids, s.send_to, payload), PAYLOAD, 5.0, 0.01,
+))
+check("fan-out under rearm: a sid that appears later is picked up by a re-send", r == answered and any(sid == "b" for sid, _ in s.sent) and s.calls >= 2, (r, s.sent, s.calls))
+check("fan-out under rearm: every send to the silent sid was cancelled", s.cancelled.count("a") == sum(1 for sid, _ in s.sent if sid == "a"), (s.sent, s.cancelled))
+
+
+async def cancel_outer(sessions):
+    task = asyncio.ensure_future(mod._fan_out_call(sessions.list_sids, sessions.send_to, PAYLOAD))
+    while len(sessions.sent) < 2:
+        await asyncio.sleep(0.001)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        return "cancelled"
+    return "returned"
+
+
+s = FakeSessions(["a", "b"], {"a": None, "b": None})
+r = asyncio.run(cancel_outer(s))
+check("fan-out: cancelling the outer call cancels every child send", r == "cancelled" and sorted(s.cancelled) == ["a", "b"], (r, s.cancelled))
+
 # ---- reply mapping ----
 r = mod._map_user_input_response({"answers": {"q1": "Only auth", "busy": " Retry "}}, norm)
 check("answers mapped and stripped", r == {"status": "answered", "answers": {"q1": "Only auth", "busy": "Retry"}}, r)

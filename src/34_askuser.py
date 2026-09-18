@@ -5,6 +5,9 @@
 # same questions as markdown for clients with no form (Conduit, API callers,
 # anything without a socket session), and maps the form's reply into the
 # tool result. No SDK or Open WebUI imports so the head-slice suites reach it.
+# Open WebUI's `__event_call__` targets the one sid that sent the message,
+# and the browser drops the frame without an ack unless that tab has the
+# chat open, so another tab or device never sees the form (2026-09-18).
 # ---------------------------------------------------------------------------
 
 _ASK_USER_TOOL = "mcp__ask-user__ask_user"
@@ -24,7 +27,9 @@ _ASK_USER_WAIT_MINUTES_MAX = 240
 # message is already in its local store; otherwise it drops it silently and
 # never acknowledges (a form sent the same second the chat was re-opened
 # was lost, 2026-09-17). Re-sending the same event resets the same form, so
-# a periodic re-send is what gets a dropped form in front of the user.
+# a periodic re-send is what gets a dropped form in front of the user. Each
+# re-send re-enumerates the user's sessions, so a tab or device opened after
+# the form first fired gets it on the next re-arm.
 _ASK_USER_REARM_SECONDS = 60
 _ASK_USER_REARM_SECONDS_MIN = 10
 _ASK_USER_REARM_SECONDS_MAX = 600
@@ -206,11 +211,59 @@ async def _ask_with_rearm(
             # Every cancelled send leaves its ack callback registered in
             # python-socketio's manager until the client acks or disconnects
             # (socketio/async_server.py `call`, base_manager.py), so each
-            # re-send costs one entry for the life of the session: ~30 per
-            # unanswered form at the defaults, cleared on disconnect. That
-            # is why the interval floor is 10 s and the default 60 s.
+            # re-send costs one entry per live session for the life of that
+            # session: ~30 per session per unanswered form at the defaults,
+            # cleared on disconnect. That is why the interval floor is 10 s
+            # and the default 60 s.
             if not done and rearm_seconds:
                 tasks.append(asyncio.ensure_future(event_call(payload)))
+    finally:
+        leftover = [t for t in tasks if not t.done()]
+        for task in leftover:
+            task.cancel()
+        if leftover:
+            await asyncio.gather(*leftover, return_exceptions=True)
+
+
+async def _fan_out_call(
+    list_sids: Callable[[], List[str]], send_to: Callable, payload: Dict[str, Any],
+    origin_sid: Optional[str] = None,
+) -> Any:
+    """Send one event to every sid at once and return the first reply that
+    is not an error. An error from the originating sid is final: a client
+    with no form (Conduit) acks the event with an error at once, and the
+    turn must fall through to asking in text instead of waiting on tabs
+    that were never looking. The same error from any other sid says nothing
+    about the one the user is typing in, so it is ignored while others
+    pend; all-failed returns the origin's error, else the first in sid
+    order. No sids at all is not a verdict either: every session may be
+    mid-reconnect, so the call parks until the re-arm loop cancels it."""
+    sids = list(list_sids() or [])
+    tasks: List["asyncio.Task"] = [
+        asyncio.ensure_future(send_to(sid, payload)) for sid in sids
+    ]
+    by_sid = dict(zip(sids, tasks))
+    try:
+        if not tasks:
+            await asyncio.Event().wait()
+        while True:
+            pending = [t for t in tasks if not t.done()]
+            if not pending:
+                break
+            done, _ = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                output = _task_output(task)
+                if not isinstance(output, dict):
+                    continue
+                if not output.get("error") or task is by_sid.get(origin_sid):
+                    return output
+        origin = by_sid.get(origin_sid)
+        ordered = ([origin] if origin is not None else []) + tasks
+        for task in ordered:
+            output = _task_output(task)
+            if isinstance(output, dict) and output.get("error"):
+                return output
+        return _task_output(tasks[0])
     finally:
         leftover = [t for t in tasks if not t.done()]
         for task in leftover:
