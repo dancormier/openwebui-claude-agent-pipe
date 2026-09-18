@@ -113,11 +113,14 @@
             le=_ASK_USER_REARM_SECONDS_MAX,
             description=(
                 "Re-send an unanswered ask_user form every N seconds "
-                "(10-600; 0 disables). The web client drops a form that "
-                "arrives while the chat is not open or the reply is not yet "
-                "in view, and never says so; the re-send is what puts it "
-                "back. A re-send resets a form the user is part-way through "
-                "answering, so keep this well above the time an answer takes."
+                "(10-600; 0 disables). Each send goes to every live session "
+                "of the user, so a tab or device opened after the form "
+                "fired gets it on the next re-send. The web client drops a "
+                "form that arrives while the chat is not open or the reply "
+                "is not yet in view, and never says so; the re-send is what "
+                "puts it back. A re-send resets a form the user is part-way "
+                "through answering, so keep this well above the time an "
+                "answer takes."
             ),
         )
         SESSION_SEARCH: bool = Field(
@@ -601,7 +604,14 @@
             mcp_servers["knowledge"] = kb_server
         if self.valves.ASK_USER:
             ask_server, ask_tool_names = _build_ask_user_mcp_server(
-                event_call, self.valves.ASK_USER_WAIT_MINUTES,
+                _fan_out_event_call(
+                    (__user__ or {}).get("id"),
+                    (__metadata__ or {}).get("chat_id"),
+                    (__metadata__ or {}).get("message_id"),
+                    event_call,
+                    (__metadata__ or {}).get("session_id"),
+                ),
+                self.valves.ASK_USER_WAIT_MINUTES,
                 self.valves.ASK_USER_REARM_SECONDS,
             )
             mcp_servers["ask-user"] = ask_server

@@ -707,6 +707,9 @@ def _extract_effort_prefix(prompt: str) -> Tuple[Optional[str], str]:
 # same questions as markdown for clients with no form (Conduit, API callers,
 # anything without a socket session), and maps the form's reply into the
 # tool result. No SDK or Open WebUI imports so the head-slice suites reach it.
+# Open WebUI's `__event_call__` targets the one sid that sent the message,
+# and the browser drops the frame without an ack unless that tab has the
+# chat open, so another tab or device never sees the form (2026-09-18).
 # ---------------------------------------------------------------------------
 
 _ASK_USER_TOOL = "mcp__ask-user__ask_user"
@@ -726,7 +729,9 @@ _ASK_USER_WAIT_MINUTES_MAX = 240
 # message is already in its local store; otherwise it drops it silently and
 # never acknowledges (a form sent the same second the chat was re-opened
 # was lost, 2026-09-17). Re-sending the same event resets the same form, so
-# a periodic re-send is what gets a dropped form in front of the user.
+# a periodic re-send is what gets a dropped form in front of the user. Each
+# re-send re-enumerates the user's sessions, so a tab or device opened after
+# the form first fired gets it on the next re-arm.
 _ASK_USER_REARM_SECONDS = 60
 _ASK_USER_REARM_SECONDS_MIN = 10
 _ASK_USER_REARM_SECONDS_MAX = 600
@@ -908,11 +913,59 @@ async def _ask_with_rearm(
             # Every cancelled send leaves its ack callback registered in
             # python-socketio's manager until the client acks or disconnects
             # (socketio/async_server.py `call`, base_manager.py), so each
-            # re-send costs one entry for the life of the session: ~30 per
-            # unanswered form at the defaults, cleared on disconnect. That
-            # is why the interval floor is 10 s and the default 60 s.
+            # re-send costs one entry per live session for the life of that
+            # session: ~30 per session per unanswered form at the defaults,
+            # cleared on disconnect. That is why the interval floor is 10 s
+            # and the default 60 s.
             if not done and rearm_seconds:
                 tasks.append(asyncio.ensure_future(event_call(payload)))
+    finally:
+        leftover = [t for t in tasks if not t.done()]
+        for task in leftover:
+            task.cancel()
+        if leftover:
+            await asyncio.gather(*leftover, return_exceptions=True)
+
+
+async def _fan_out_call(
+    list_sids: Callable[[], List[str]], send_to: Callable, payload: Dict[str, Any],
+    origin_sid: Optional[str] = None,
+) -> Any:
+    """Send one event to every sid at once and return the first reply that
+    is not an error. An error from the originating sid is final: a client
+    with no form (Conduit) acks the event with an error at once, and the
+    turn must fall through to asking in text instead of waiting on tabs
+    that were never looking. The same error from any other sid says nothing
+    about the one the user is typing in, so it is ignored while others
+    pend; all-failed returns the origin's error, else the first in sid
+    order. No sids at all is not a verdict either: every session may be
+    mid-reconnect, so the call parks until the re-arm loop cancels it."""
+    sids = list(list_sids() or [])
+    tasks: List["asyncio.Task"] = [
+        asyncio.ensure_future(send_to(sid, payload)) for sid in sids
+    ]
+    by_sid = dict(zip(sids, tasks))
+    try:
+        if not tasks:
+            await asyncio.Event().wait()
+        while True:
+            pending = [t for t in tasks if not t.done()]
+            if not pending:
+                break
+            done, _ = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                output = _task_output(task)
+                if not isinstance(output, dict):
+                    continue
+                if not output.get("error") or task is by_sid.get(origin_sid):
+                    return output
+        origin = by_sid.get(origin_sid)
+        ordered = ([origin] if origin is not None else []) + tasks
+        for task in ordered:
+            output = _task_output(task)
+            if isinstance(output, dict) and output.get("error"):
+                return output
+        return _task_output(tasks[0])
     finally:
         leftover = [t for t in tasks if not t.done()]
         for task in leftover:
@@ -2343,6 +2396,58 @@ def _build_kb_mcp_server(
     server = create_sdk_mcp_server("knowledge", "0.1", tools=tools_list)
     return server, tool_names
 
+def _fan_out_event_call(
+    user_id: Optional[str], chat_id: Optional[str], message_id: Optional[str],
+    fallback: Optional[Callable], origin_sid: Optional[str] = None,
+) -> Optional[Callable]:
+    """An event_call that reaches every live session of the user instead of
+    the one sid Open WebUI's `__event_call__` is bound to. Falls back to the
+    given call outside Open WebUI (head-slice tests) or without the ids the
+    frame needs."""
+    if not (user_id and chat_id and message_id):
+        return fallback
+    try:
+        from open_webui.socket.main import sio, SESSION_POOL, get_session_ids_by_user_id
+        from open_webui.env import WEBSOCKET_EVENT_CALLER_TIMEOUT
+    except ImportError as exc:
+        log.debug("ask_user fan-out unavailable, using the single-sid call: %s", exc)
+        return fallback
+    timeout_errors: Tuple[type, ...] = (TimeoutError,)
+    try:
+        import socketio
+
+        timeout_errors = (TimeoutError, socketio.exceptions.TimeoutError)
+    except (ImportError, AttributeError):
+        pass
+
+    def list_sids() -> List[str]:
+        # get_session_ids_by_user_id can name sids the pool has already
+        # dropped; Open WebUI's own caller re-checks ownership the same way.
+        live = sorted(
+            sid for sid in set(get_session_ids_by_user_id(user_id))
+            if (SESSION_POOL.get(sid) or {}).get("id") == user_id
+        )
+        if origin_sid in live:
+            live.remove(origin_sid)
+            live.insert(0, origin_sid)
+        return live
+
+    async def send_to(sid: str, payload: Dict[str, Any]) -> Any:
+        try:
+            return await sio.call(
+                "events",
+                {"chat_id": chat_id, "message_id": message_id, "data": payload},
+                to=sid, timeout=WEBSOCKET_EVENT_CALLER_TIMEOUT,
+            )
+        except timeout_errors:
+            return {"error": "Event call timed out. The browser tab may be inactive or closed."}
+
+    async def event_call(payload: Dict[str, Any]) -> Any:
+        return await _fan_out_call(list_sids, send_to, payload, origin_sid)
+
+    return event_call
+
+
 def _build_ask_user_mcp_server(
     event_call: Optional[Callable],
     wait_minutes: int = _ASK_USER_WAIT_MINUTES,
@@ -2883,11 +2988,14 @@ class Pipe:
             le=_ASK_USER_REARM_SECONDS_MAX,
             description=(
                 "Re-send an unanswered ask_user form every N seconds "
-                "(10-600; 0 disables). The web client drops a form that "
-                "arrives while the chat is not open or the reply is not yet "
-                "in view, and never says so; the re-send is what puts it "
-                "back. A re-send resets a form the user is part-way through "
-                "answering, so keep this well above the time an answer takes."
+                "(10-600; 0 disables). Each send goes to every live session "
+                "of the user, so a tab or device opened after the form "
+                "fired gets it on the next re-send. The web client drops a "
+                "form that arrives while the chat is not open or the reply "
+                "is not yet in view, and never says so; the re-send is what "
+                "puts it back. A re-send resets a form the user is part-way "
+                "through answering, so keep this well above the time an "
+                "answer takes."
             ),
         )
         SESSION_SEARCH: bool = Field(
@@ -3371,7 +3479,14 @@ class Pipe:
             mcp_servers["knowledge"] = kb_server
         if self.valves.ASK_USER:
             ask_server, ask_tool_names = _build_ask_user_mcp_server(
-                event_call, self.valves.ASK_USER_WAIT_MINUTES,
+                _fan_out_event_call(
+                    (__user__ or {}).get("id"),
+                    (__metadata__ or {}).get("chat_id"),
+                    (__metadata__ or {}).get("message_id"),
+                    event_call,
+                    (__metadata__ or {}).get("session_id"),
+                ),
+                self.valves.ASK_USER_WAIT_MINUTES,
                 self.valves.ASK_USER_REARM_SECONDS,
             )
             mcp_servers["ask-user"] = ask_server

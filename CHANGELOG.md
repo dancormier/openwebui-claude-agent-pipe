@@ -4,6 +4,21 @@ Patches on top of [tfriedel/openwebui-claude-code](https://github.com/tfriedel/o
 commit `5bbc1fc`, in the order they landed. Numbering matches the pipe's own
 comments and the pull requests that introduced them.
 
+## Unreleased
+
+- An `ask_user` form now goes to every live socket session of the user, on
+  the first send and on every re-send, instead of only the tab that sent
+  the message. Open WebUI's `__event_call__` targets that one sid, and the
+  browser drops the frame without a word unless that tab has the chat open,
+  so a chat followed from another tab or device never got the form (one sat
+  23 minutes that way, 2026-09-18). A tab opened later gets it on the next
+  re-send. A client with no form (Conduit) still gets the questions as text
+  at once when it is the one that sent the message. The costs: two tabs on
+  the same chat both render the form, the first answer wins and the other
+  goes stale; and with no live session at all the turn now waits out
+  `ASK_USER_WAIT_MINUTES` for one to appear before falling back to text,
+  where it used to fall back at once.
+
 ## v0.3.3 (2026-09-17)
 
 - Artifact links can be absolute: the new `PUBLIC_BASE_URL` valve (falling

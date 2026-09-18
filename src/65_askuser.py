@@ -1,4 +1,56 @@
 
+def _fan_out_event_call(
+    user_id: Optional[str], chat_id: Optional[str], message_id: Optional[str],
+    fallback: Optional[Callable], origin_sid: Optional[str] = None,
+) -> Optional[Callable]:
+    """An event_call that reaches every live session of the user instead of
+    the one sid Open WebUI's `__event_call__` is bound to. Falls back to the
+    given call outside Open WebUI (head-slice tests) or without the ids the
+    frame needs."""
+    if not (user_id and chat_id and message_id):
+        return fallback
+    try:
+        from open_webui.socket.main import sio, SESSION_POOL, get_session_ids_by_user_id
+        from open_webui.env import WEBSOCKET_EVENT_CALLER_TIMEOUT
+    except ImportError as exc:
+        log.debug("ask_user fan-out unavailable, using the single-sid call: %s", exc)
+        return fallback
+    timeout_errors: Tuple[type, ...] = (TimeoutError,)
+    try:
+        import socketio
+
+        timeout_errors = (TimeoutError, socketio.exceptions.TimeoutError)
+    except (ImportError, AttributeError):
+        pass
+
+    def list_sids() -> List[str]:
+        # get_session_ids_by_user_id can name sids the pool has already
+        # dropped; Open WebUI's own caller re-checks ownership the same way.
+        live = sorted(
+            sid for sid in set(get_session_ids_by_user_id(user_id))
+            if (SESSION_POOL.get(sid) or {}).get("id") == user_id
+        )
+        if origin_sid in live:
+            live.remove(origin_sid)
+            live.insert(0, origin_sid)
+        return live
+
+    async def send_to(sid: str, payload: Dict[str, Any]) -> Any:
+        try:
+            return await sio.call(
+                "events",
+                {"chat_id": chat_id, "message_id": message_id, "data": payload},
+                to=sid, timeout=WEBSOCKET_EVENT_CALLER_TIMEOUT,
+            )
+        except timeout_errors:
+            return {"error": "Event call timed out. The browser tab may be inactive or closed."}
+
+    async def event_call(payload: Dict[str, Any]) -> Any:
+        return await _fan_out_call(list_sids, send_to, payload, origin_sid)
+
+    return event_call
+
+
 def _build_ask_user_mcp_server(
     event_call: Optional[Callable],
     wait_minutes: int = _ASK_USER_WAIT_MINUTES,
