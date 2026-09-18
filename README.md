@@ -43,7 +43,7 @@ repo is where the idea came from.
   line at the end; the message's ⓘ usage popover also gets the turn's
   duration and the subscription's usage windows (session, weekly, per-model,
   extra usage) with the time left until each resets.
-- **`ask_user`** — the agent can pause and ask up to four multiple-choice
+- **`ask_user`** — the agent can pause and ask up to three multiple-choice
   questions through Open WebUI's own form, and get the answers in the same turn.
 - **Earlier chats** — `search_chats` / `read_chat` let the agent look up the
   calling user's past conversations (sqlite deployments; read-only; scoped to

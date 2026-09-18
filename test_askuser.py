@@ -72,7 +72,8 @@ Q = [
 norm = mod._normalize_questions(Q)
 check("ids default to q<n>, explicit id kept", [q["id"] for q in norm] == ["q1", "busy"], norm)
 check("header defaults to Question <n>", norm[1]["header"] == "Question 2")
-check("string option becomes label with empty description", norm[1]["options"][2] == {"label": "Queue", "description": ""})
+check("string option becomes label, description falls back to the label", norm[1]["options"][2] == {"label": "Queue", "description": "Queue"})
+check("blank description falls back to the label", mod._normalize_questions([{"question": "q", "options": [{"label": "A", "description": "  "}, "B"]}])[0]["options"][0]["description"] == "A")
 check("allow_other defaults true, explicit false kept", norm[0]["allow_other"] is True and norm[1]["allow_other"] is False)
 check("description kept", norm[0]["options"][0]["description"] == "Smallest diff (recommended)")
 
@@ -82,14 +83,16 @@ check("fields clamped to the form's limits", len(n1["question"]) == 500 and len(
 
 check("rejects empty list", raises(mod._normalize_questions, []) is not None)
 check("rejects non-list", raises(mod._normalize_questions, "q?") is not None)
-check("rejects five questions", "at most 4" in (raises(mod._normalize_questions, [Q[0]] * 5) or ""))
+check("three questions pass", len(mod._normalize_questions([{**Q[0], "id": f"q{n}"} for n in range(3)])) == 3)
+check("rejects four questions", "at most 3" in (raises(mod._normalize_questions, [{**Q[0], "id": f"q{n}"} for n in range(4)]) or ""))
 check("rejects four options", "at most 3" in (raises(mod._normalize_questions, [{"question": "q", "options": ["a", "b", "c", "d"]}]) or ""))
 free = mod._normalize_questions([{"question": "Which restaurant?", "allow_other": False}, {"question": "q", "options": ["only"], "allow_other": False}])
 check("no options → free text, allow_other forced on", free[0]["options"] == [] and free[0]["allow_other"] is True)
-check("one option → allow_other forced on", len(free[1]["options"]) == 1 and free[1]["allow_other"] is True)
+check("lone option dropped → free text, allow_other forced on", free[1]["options"] == [] and free[1]["allow_other"] is True)
 fmd = mod._render_questions_markdown(free)
 check("free-text question renders a type-your-answer line", "1. **Question 1** — Which restaurant?\n   - type your answer\n" in fmd, fmd)
-check("reply hint mixes typed and lettered picks", fmd.rstrip().endswith("e.g. `1: …, 2a`."), fmd)
+check("reply hint for free-text questions", fmd.rstrip().endswith("e.g. `1: …, 2: …`."), fmd)
+check("reply hint mixes typed and lettered picks", mod._render_questions_markdown(mod._normalize_questions([{"question": "a"}, Q[0]])).rstrip().endswith("e.g. `1: …, 2a`."))
 check("rejects missing question text", "question text" in (raises(mod._normalize_questions, [{"options": ["a", "b"]}]) or ""))
 check("rejects blank label", "label" in (raises(mod._normalize_questions, [{"question": "q", "options": [{"label": " "}, "b"]}]) or ""))
 check("rejects duplicate ids", "duplicate" in (raises(mod._normalize_questions, [{"id": "x", "question": "q", "options": ["a", "b"]}] * 2) or ""))
@@ -98,7 +101,7 @@ check("rejects duplicate ids", "duplicate" in (raises(mod._normalize_questions, 
 md = mod._render_questions_markdown(norm)
 check("questions numbered with header", "1. **Scope** — Which files should the migration touch?" in md, md)
 check("options lettered with description", "   - (a) Only auth — Smallest diff (recommended)" in md, md)
-check("option without description has no dash", "   - (c) Queue\n" in md, md)
+check("option whose description is its label renders without a dash", "   - (c) Queue\n" in md, md)
 check("free-text line only when allow_other", md.count("or type your own answer") == 1)
 check("reply hint covers every question", md.rstrip().endswith("Reply with your picks, e.g. `1a, 2a`."), md)
 
@@ -118,6 +121,7 @@ check("rearm bound is the valve as float seconds", mod._ask_user_rearm_seconds(6
 check("rearm 0 disables", mod._ask_user_rearm_seconds(0) == 0.0)
 check("rearm below the floor clamps up", mod._ask_user_rearm_seconds(3) == mod._ASK_USER_REARM_SECONDS_MIN)
 check("rearm above the ceiling clamps down", mod._ask_user_rearm_seconds(9999) == mod._ASK_USER_REARM_SECONDS_MAX)
+check("old ceiling of 600 clamps to 110, under Conduit's form expiry", mod._ask_user_rearm_seconds(600) == 110.0)
 for bad in ("60", None, 2.5, True):
     check(f"rearm {bad!r} falls back to the default", mod._ask_user_rearm_seconds(bad) == float(mod._ASK_USER_REARM_SECONDS))
 check("negative rearm disables", mod._ask_user_rearm_seconds(-1) == 0.0)
@@ -190,7 +194,32 @@ c = FakeClient([(0.02, {"error": "Event call timed out. The browser tab may be i
 r = run(c, rearm=0.01)
 check("server timeout on the first send is ignored while a re-send is pending", r == answered and c.sends >= 2, (r, c.sends))
 
+CANCELLED = {"status": "cancelled"}
+
+# ---- supersede-cancel: Conduit acks the old send with cancelled when a re-send replaces its form ----
+c = FakeClient([(0.3, CANCELLED), (0.15, answered)])
+r = run(c, rearm=0.2)
+check("cancel from an older send is ignored while a re-send pends, re-send answers", r == answered and c.sends == 2, (r, c.sends))
+
+c = FakeClient([CANCELLED])
+check("cancel from the latest send settles at once, rearm disabled", run(c, rearm=0) == CANCELLED and c.sends == 1, c.sends)
+
+c = FakeClient([(0.05, CANCELLED)])
+check("cancel from the first send before any re-send settles at once", run(c, rearm=1.0) == CANCELLED and c.sends == 1, c.sends)
+
+c = FakeClient([(0.3, CANCELLED), (0.15, CANCELLED)])
+r = run(c, rearm=0.2)
+check("older cancel ignored, then a cancel on the latest send settles as cancelled", r == CANCELLED and c.sends == 2, (r, c.sends))
+
+c = FakeClient([(0.3, answered)])
+r = run(c, rearm=0.2)
+check("answers from an older send settle while a newer send pends", r == answered and c.sends == 2 and c.cancelled == 1, (r, c.sends, c.cancelled))
+
 TIMED_OUT = {"error": "Event call timed out. The browser tab may be inactive or closed."}
+
+c = FakeClient([(0.32, CANCELLED), (0.02, TIMED_OUT)])
+r = run(c, rearm=0.2)
+check("all done, latest timed out, older supersede-cancel: the latest outcome wins", r == TIMED_OUT and c.sends == 2, (r, c.sends))
 
 
 class GatedClient(FakeClient):
