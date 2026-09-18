@@ -4,7 +4,7 @@ Patches on top of [tfriedel/openwebui-claude-code](https://github.com/tfriedel/o
 commit `5bbc1fc`, in the order they landed. Numbering matches the pipe's own
 comments and the pull requests that introduced them.
 
-## Unreleased
+## v0.3.5 (2026-09-18)
 
 - The `ask_user` form now renders in Conduit (v4.1.5 and later), whose
   parser is stricter than the web client's: at most three questions per
