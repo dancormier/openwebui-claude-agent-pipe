@@ -4,7 +4,7 @@ Patches on top of [tfriedel/openwebui-claude-code](https://github.com/tfriedel/o
 commit `5bbc1fc`, in the order they landed. Numbering matches the pipe's own
 comments and the pull requests that introduced them.
 
-## Unreleased
+## v0.3.4 (2026-09-18)
 
 - An `ask_user` form now goes to every live socket session of the user, on
   the first send and on every re-send, instead of only the tab that sent
