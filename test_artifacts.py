@@ -240,6 +240,18 @@ with tempfile.TemporaryDirectory() as tmp:
     check("png keeps its own type", types.get("g.png") == "image/png", types.get("g.png"))
     check("pdf keeps its own type", types.get("h.pdf") == "application/pdf", types.get("h.pdf"))
 
+# ---- audio files are uploaded as audio ----
+with tempfile.TemporaryDirectory() as tmp:
+    root = pathlib.Path(tmp)
+    before = mod._snapshot_artifacts([root])
+    for name in ("a.mp3", "b.wav", "c.m4a"):
+        touch(root, name)
+    forms.clear()
+    inline([root], before, "user")
+    types = {f["filename"]: f["meta"]["content_type"] for f in forms}
+    for name in ("a.mp3", "b.wav", "c.m4a"):
+        check(f"{name} uploaded as audio", (types.get(name) or "").startswith("audio/"), types.get(name))
+
 # ---- the agent is told not to link workdir files by path ----
 check("prompt names the paperclip line", "paperclip" in mod._ARTIFACTS_PROMPT)
 check("prompt forbids filesystem-path links", "Never link a workdir file by its filesystem path" in mod._ARTIFACTS_PROMPT)

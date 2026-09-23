@@ -1700,6 +1700,9 @@ _DOWNLOAD_EXTENSIONS = {
     ".docx",
     ".pptx",
     ".zip",
+    ".mp3",
+    ".wav",
+    ".m4a",
 }
 _ARTIFACT_EXTENSIONS = _IMAGE_EXTENSIONS | _DOWNLOAD_EXTENSIONS
 # Open WebUI's /api/v1/files/{id}/content route serves only text/plain and
