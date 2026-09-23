@@ -4,6 +4,13 @@ Patches on top of [tfriedel/openwebui-claude-code](https://github.com/tfriedel/o
 commit `5bbc1fc`, in the order they landed. Numbering matches the pipe's own
 comments and the pull requests that introduced them.
 
+## v0.3.6 (2026-09-23)
+
+- Audio files (`.mp3`, `.wav`, `.m4a`) an agent writes into the chat
+  workdir are now uploaded and linked like other deliverables. They were
+  silently skipped before, so a reply could claim an attachment that never
+  arrived.
+
 ## v0.3.5 (2026-09-18)
 
 - The `ask_user` form now renders in Conduit (v4.1.5 and later), whose
