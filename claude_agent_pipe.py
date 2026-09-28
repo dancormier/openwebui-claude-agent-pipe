@@ -1528,6 +1528,33 @@ def _parse_remote_mcp_servers(raw: str) -> tuple:
         servers[name] = server
         tools.append(f"mcp__{name}")
     return servers, tools, errors
+
+
+def _write_remote_mcp_config(servers: dict, directory: Path) -> Path:
+    """Write {"mcpServers": servers} to a fresh 0600 file and return its path.
+
+    The SDK serialises a dict of servers straight into the CLI's argv, where
+    a bearer header is readable by any `ps` on the host -- a subagent's `ps`
+    put a live key into its own transcript on 2026-09-21. The CLI accepts a
+    second --mcp-config that is a file path, so the remote entries travel
+    that way and only the in-process servers stay in the dict.
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    os.chmod(directory, 0o700)
+    # A turn cut off before its finally leaves its file behind; turns run
+    # hours at most, so anything a day old is such a leftover.
+    cutoff = time.time() - 86400
+    for stale in directory.glob("*.json"):
+        try:
+            if stale.stat().st_mtime < cutoff:
+                stale.unlink()
+        except OSError:
+            pass
+    path = directory / f"{uuid.uuid4().hex}.json"
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        json.dump({"mcpServers": servers}, fh)
+    return path
 # ---------------------------------------------------------------------------
 # Chat search: the pure half. Open WebUI keeps a chat's messages inside the
 # `chat` JSON column (history.messages keyed by id, or a flat messages list on
@@ -3049,7 +3076,8 @@ class Pipe:
                 '{"linear": {"url": "https://mcp.linear.app/mcp", "headers": '
                 '{"Authorization": "Bearer lin_api_..."}}}. Header values are '
                 "credentials and live in Open WebUI's database like the keys "
-                "above. Names must be lowercase [a-z0-9_-]; plain http only to "
+                "above; they reach Claude Code through a 0600 file, never its "
+                "command line. Names must be lowercase [a-z0-9_-]; plain http only to "
                 "localhost. Each server's tools are allowed as mcp__<name> and "
                 "arrive deferred, so the agent finds them through ToolSearch. "
                 "A malformed entry is logged and skipped; the rest still load."
@@ -3538,12 +3566,10 @@ class Pipe:
         )
         for msg in remote_errors:
             log.warning("REMOTE_MCP_SERVERS: %s", msg)
-        for name, cfg in remote_servers.items():
-            if name in mcp_servers:
-                log.warning("REMOTE_MCP_SERVERS: %r shadows a built-in server; skipped", name)
-                continue
-            mcp_servers[name] = cfg
-            allowed_tools = allowed_tools + [f"mcp__{name}"]
+        for name in [n for n in remote_servers if n in mcp_servers]:
+            log.warning("REMOTE_MCP_SERVERS: %r shadows a built-in server; skipped", name)
+            del remote_servers[name]
+        allowed_tools = allowed_tools + [f"mcp__{name}" for name in remote_servers]
 
         options_kwargs: Dict[str, Any] = {
             "cwd": str(cwd),
@@ -3636,8 +3662,6 @@ class Pipe:
         if agent_env:
             options_kwargs["env"] = {**options_kwargs.get("env", {}), **agent_env}
 
-        options = ClaudeAgentOptions(**options_kwargs)
-
         async def emit_status(description: str, done: bool = False) -> None:
             if __event_emitter__ is None:
                 return
@@ -3693,6 +3717,18 @@ class Pipe:
             if heartbeat_task is None or heartbeat_task.done():
                 heartbeat_task = asyncio.create_task(_heartbeat())
 
+        # Written last so nothing between the write and the finally can be
+        # cancelled and strand a bearer token on disk.
+        remote_mcp_file: Optional[Path] = None
+        if remote_servers:
+            try:
+                remote_mcp_file = _write_remote_mcp_config(
+                    remote_servers, Path(workdir_root) / ".mcp"
+                )
+                options_kwargs["extra_args"] = {"mcp-config": str(remote_mcp_file)}
+            except OSError as exc:
+                log.warning("REMOTE_MCP_SERVERS: config file not written, servers skipped: %s", exc)
+        options = ClaudeAgentOptions(**options_kwargs)
         try:
             async with ClaudeSDKClient(options=options) as client:
                 if inflight is not None:
@@ -3883,6 +3919,11 @@ class Pipe:
             await emit_status(f"Error: {exc}", done=True)
             yield f"\n\n**Claude Code error:** `{type(exc).__name__}: {exc}`\n"
         finally:
+            if remote_mcp_file is not None:
+                try:
+                    remote_mcp_file.unlink()
+                except OSError:
+                    pass
             state.active_tools.clear()
             if heartbeat_task is not None and not heartbeat_task.done():
                 heartbeat_task.cancel()

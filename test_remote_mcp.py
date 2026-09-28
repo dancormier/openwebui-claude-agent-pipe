@@ -94,6 +94,27 @@ check("lin_api_ key redacted", "lin_api_a1B2" not in clean and "linear-api-key" 
 clean, hits = mod._redact_secrets("short lin_api_abc stays")
 check("short lookalike untouched", clean == "short lin_api_abc stays", repr(clean))
 
+print("remote servers travel by file, never argv")
+import os, stat, tempfile
+with tempfile.TemporaryDirectory() as td:
+    target = pathlib.Path(td) / ".mcp"
+    servers, _, _ = mod._parse_remote_mcp_servers(json.dumps({
+        "linear": {"url": "https://mcp.linear.app/mcp",
+                   "headers": {"Authorization": "Bearer lin_api_a1B2c3D4e5F6g7H8i9J0k1L2"}},
+    }))
+    f1 = mod._write_remote_mcp_config(servers, target)
+    f2 = mod._write_remote_mcp_config(servers, target)
+    check("file mode is 0600", stat.S_IMODE(f1.stat().st_mode) == 0o600, oct(f1.stat().st_mode))
+    check("directory mode is 0700", stat.S_IMODE(target.stat().st_mode) == 0o700, oct(target.stat().st_mode))
+    check("two turns get two files", f1 != f2 and f1.exists() and f2.exists(), (f1, f2))
+    body = json.loads(f1.read_text())
+    check("file carries the mcpServers wrapper the CLI expects",
+          body == {"mcpServers": servers}, repr(body))
+    check("header value is in the file", "lin_api_a1B2" in f1.read_text())
+    os.utime(f1, (0, 0))
+    f3 = mod._write_remote_mcp_config(servers, target)
+    check("day-old leftover swept on the next write", not f1.exists() and f2.exists() and f3.exists())
+
 print()
 if fails:
     print(f"{len(fails)} failed: {fails}")

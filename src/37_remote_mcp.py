@@ -69,3 +69,30 @@ def _parse_remote_mcp_servers(raw: str) -> tuple:
         servers[name] = server
         tools.append(f"mcp__{name}")
     return servers, tools, errors
+
+
+def _write_remote_mcp_config(servers: dict, directory: Path) -> Path:
+    """Write {"mcpServers": servers} to a fresh 0600 file and return its path.
+
+    The SDK serialises a dict of servers straight into the CLI's argv, where
+    a bearer header is readable by any `ps` on the host -- a subagent's `ps`
+    put a live key into its own transcript on 2026-09-21. The CLI accepts a
+    second --mcp-config that is a file path, so the remote entries travel
+    that way and only the in-process servers stay in the dict.
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    os.chmod(directory, 0o700)
+    # A turn cut off before its finally leaves its file behind; turns run
+    # hours at most, so anything a day old is such a leftover.
+    cutoff = time.time() - 86400
+    for stale in directory.glob("*.json"):
+        try:
+            if stale.stat().st_mtime < cutoff:
+                stale.unlink()
+        except OSError:
+            pass
+    path = directory / f"{uuid.uuid4().hex}.json"
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        json.dump({"mcpServers": servers}, fh)
+    return path
