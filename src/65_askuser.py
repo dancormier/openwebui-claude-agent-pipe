@@ -3,18 +3,30 @@ def _fan_out_event_call(
     user_id: Optional[str], chat_id: Optional[str], message_id: Optional[str],
     fallback: Optional[Callable], origin_sid: Optional[str] = None,
 ) -> Optional[Callable]:
-    """An event_call that reaches every live session of the user instead of
-    the one sid Open WebUI's `__event_call__` is bound to. Falls back to the
-    given call outside Open WebUI (head-slice tests) or without the ids the
-    frame needs."""
+    """A factory of event_calls that reach every live session of the user
+    instead of the one sid Open WebUI's `__event_call__` is bound to. Each
+    ask takes a fresh call from it, so the once-per-session bookkeeping
+    (which sids already hold the form) starts empty per form. Falls back to
+    the given call outside Open WebUI (head-slice tests) or without the ids
+    the frame needs, wrapped the same way so even that sid is sent the form
+    once."""
+    if fallback is not None:
+        origin = origin_sid or "origin"
+
+        async def send_fallback(sid: str, payload: Dict[str, Any]) -> Any:
+            return await fallback(payload)
+
+        def make_fallback() -> Callable:
+            return _once_per_session_call(lambda: [origin], send_fallback, origin)
+
     if not (user_id and chat_id and message_id):
-        return fallback
+        return make_fallback if fallback is not None else None
     try:
         from open_webui.socket.main import sio, SESSION_POOL, get_session_ids_by_user_id
         from open_webui.env import WEBSOCKET_EVENT_CALLER_TIMEOUT
     except ImportError as exc:
         log.debug("ask_user fan-out unavailable, using the single-sid call: %s", exc)
-        return fallback
+        return make_fallback if fallback is not None else None
     timeout_errors: Tuple[type, ...] = (TimeoutError,)
     try:
         import socketio
@@ -45,21 +57,23 @@ def _fan_out_event_call(
         except timeout_errors:
             return {"error": "Event call timed out. The browser tab may be inactive or closed."}
 
-    async def event_call(payload: Dict[str, Any]) -> Any:
-        return await _fan_out_call(list_sids, send_to, payload, origin_sid)
+    def make_event_call() -> Callable:
+        return _once_per_session_call(list_sids, send_to, origin_sid)
 
-    return event_call
+    return make_event_call
 
 
 def _build_ask_user_mcp_server(
-    event_call: Optional[Callable],
+    make_event_call: Optional[Callable[[], Callable]],
     wait_minutes: int = _ASK_USER_WAIT_MINUTES,
     rearm_seconds: int = _ASK_USER_REARM_SECONDS,
+    inflight: Optional[_InflightTurn] = None,
 ):
     """Return (mcp_config, tool_names) for the ask_user tool. Registered even
-    without an event_call: the tool then hands the questions back as markdown
-    for the agent to ask in its reply, so clients with no form still get
-    asked instead of guessed at."""
+    without an event_call factory: the tool then hands the questions back as
+    markdown for the agent to ask in its reply, so clients with no form still
+    get asked instead of guessed at. With the turn's in-flight entry, a
+    message typed into the chat while the form is pending answers it."""
 
     @tool(
         "ask_user",
@@ -132,15 +146,24 @@ def _build_ask_user_mcp_server(
                 "content": [{"type": "text", "text": f"ask_user: {exc}"}],
                 "is_error": True,
             }
-        if event_call is None:
+        if make_event_call is None:
             result = _no_ui_result(questions)
         else:
             payload = _user_input_payload(questions)
-            output = await _ask_with_rearm(
-                event_call, payload,
-                _ask_user_wait_seconds(wait_minutes),
-                _ask_user_rearm_seconds(rearm_seconds),
-            )
+            typed = None
+            if inflight is not None:
+                typed = asyncio.get_running_loop().create_future()
+                inflight.pending_ask = typed
+            try:
+                output = await _ask_with_rearm(
+                    make_event_call(), payload,
+                    _ask_user_wait_seconds(wait_minutes),
+                    _ask_user_rearm_seconds(rearm_seconds),
+                    typed=typed,
+                )
+            finally:
+                if inflight is not None:
+                    inflight.pending_ask = None
             if isinstance(output, dict) and output.get("error"):
                 log.warning("ask_user form not answered: %s", output["error"])
             result = _map_user_input_response(output, questions)

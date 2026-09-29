@@ -230,6 +230,16 @@ def _on_tool_use(
             f"{_tool_input_block(name, tool_input)}\n\n"
             "</details>\n\n"
         )
+    if name == _ASK_USER_TOOL:
+        # The form is lost if the chat is not on screen, but streamed text
+        # is replayed when the chat is reopened; this is what tells the
+        # user what was asked, and that a typed reply answers it.
+        try:
+            questions = _normalize_questions(tool_input.get("questions"))
+        except ValueError:
+            questions = []
+        if questions:
+            chunks.append("\n\n" + _render_questions_markdown(questions) + "\n\n")
     return chunks, f"🔧 {label}"
 
 

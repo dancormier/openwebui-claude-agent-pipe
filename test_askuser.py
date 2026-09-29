@@ -196,20 +196,16 @@ check("server timeout on the first send is ignored while a re-send is pending", 
 
 CANCELLED = {"status": "cancelled"}
 
-# ---- supersede-cancel: Conduit acks the old send with cancelled when a re-send replaces its form ----
+# ---- cancel: a session is sent the form once, so any cancel is the user declining ----
 c = FakeClient([(0.3, CANCELLED), (0.15, answered)])
 r = run(c, rearm=0.2)
-check("cancel from an older send is ignored while a re-send pends, re-send answers", r == answered and c.sends == 2, (r, c.sends))
+check("cancel from an older send settles while a re-send pends, re-send cancelled", r == CANCELLED and c.sends == 2 and c.cancelled == 1, (r, c.sends, c.cancelled))
 
 c = FakeClient([CANCELLED])
 check("cancel from the latest send settles at once, rearm disabled", run(c, rearm=0) == CANCELLED and c.sends == 1, c.sends)
 
 c = FakeClient([(0.05, CANCELLED)])
 check("cancel from the first send before any re-send settles at once", run(c, rearm=1.0) == CANCELLED and c.sends == 1, c.sends)
-
-c = FakeClient([(0.3, CANCELLED), (0.15, CANCELLED)])
-r = run(c, rearm=0.2)
-check("older cancel ignored, then a cancel on the latest send settles as cancelled", r == CANCELLED and c.sends == 2, (r, c.sends))
 
 c = FakeClient([(0.3, answered)])
 r = run(c, rearm=0.2)
@@ -219,7 +215,60 @@ TIMED_OUT = {"error": "Event call timed out. The browser tab may be inactive or 
 
 c = FakeClient([(0.32, CANCELLED), (0.02, TIMED_OUT)])
 r = run(c, rearm=0.2)
-check("all done, latest timed out, older supersede-cancel: the latest outcome wins", r == TIMED_OUT and c.sends == 2, (r, c.sends))
+check("latest timed out, older then cancels: the cancel settles", r == CANCELLED and c.sends == 2, (r, c.sends))
+
+
+# ---- typed answer: a chat message resolves the wait ----
+async def typed_answer(client, text, delay=0.05):
+    fut = asyncio.get_running_loop().create_future()
+    asyncio.get_running_loop().call_later(delay, fut.set_result, text)
+    return await mod._ask_with_rearm(client, PAYLOAD, 5.0, 1.0, typed=fut), fut
+
+
+c = FakeClient([None])
+r, fut = asyncio.run(typed_answer(c, "1b"))
+check("typed answer settles promptly while the send never resolves", r == {"typed": "1b"}, r)
+check("typed answer cancels the in-flight send, never the future", c.cancelled == 1 and not fut.cancelled(), (c.cancelled, fut.cancelled()))
+
+c = FakeClient([(0.01, answered)])
+r, _ = asyncio.run(typed_answer(c, "1b", delay=1.0))
+check("form answer still wins when nothing was typed", r == answered, r)
+
+
+async def typed_before():
+    fut = asyncio.get_running_loop().create_future()
+    fut.set_result("2a")
+    return await mod._ask_with_rearm(FakeClient([None]), PAYLOAD, 5.0, 1.0, typed=fut)
+
+
+check("typed answer already resolved returns without waiting", asyncio.run(typed_before()) == {"typed": "2a"})
+
+
+class CancelTypesClient(FakeClient):
+    """The second send's cancellation handler resolves the typed future:
+    the message lands while the finally is gathering cancelled sends."""
+
+    def __init__(self, script):
+        super().__init__(script)
+        self.fut = None
+
+    async def __call__(self, payload):
+        try:
+            return await super().__call__(payload)
+        except asyncio.CancelledError:
+            if not self.fut.done():
+                self.fut.set_result("typed late")
+            raise
+
+
+async def typed_during_gather():
+    client = CancelTypesClient([(0.05, answered), None])
+    client.fut = asyncio.get_running_loop().create_future()
+    return await mod._ask_with_rearm(client, PAYLOAD, 5.0, 0.02, typed=client.fut), client
+
+
+r, c = asyncio.run(typed_during_gather())
+check("typed answer arriving while cancelled sends are gathered wins over the form answer", r == {"typed": "typed late"} and c.sends >= 2, (r, c.sends))
 
 
 class GatedClient(FakeClient):
@@ -283,6 +332,8 @@ class FakeSessions:
     async def send_to(self, sid, payload):
         self.sent.append((sid, payload))
         outcome = self.scripts.get(sid)
+        if isinstance(outcome, list):
+            outcome = outcome.pop(0) if outcome else None
         try:
             if outcome is None:
                 await asyncio.sleep(3600)
@@ -370,6 +421,88 @@ s = FakeSessions(["a", "b"], {"a": None, "b": None})
 r = asyncio.run(cancel_outer(s))
 check("fan-out: cancelling the outer call cancels every child send", r == "cancelled" and sorted(s.cancelled) == ["a", "b"], (r, s.cancelled))
 
+
+# ---- once per session: a re-send never reaches a sid whose form is still pending ----
+async def once_per_session(sessions):
+    call = mod._once_per_session_call(sessions.list_sids, sessions.send_to)
+    first = asyncio.ensure_future(call(PAYLOAD))
+    await asyncio.sleep(0.02)
+    sent_after_first = list(sessions.sent)
+    second = asyncio.ensure_future(call(PAYLOAD))
+    await asyncio.sleep(0.02)
+    sent_after_second = list(sessions.sent)
+    for task in (first, second):
+        task.cancel()
+    await asyncio.gather(first, second, return_exceptions=True)
+    return sent_after_first, sent_after_second
+
+
+s = FakeSessions([["a", "err"], ["a", "err", "late"]], {"a": None, "err": RuntimeError("boom"), "late": None})
+first, second = asyncio.run(once_per_session(s))
+check("once per session: first call sends to every live sid", sorted(sid for sid, _ in first) == ["a", "err"], first)
+check("once per session: pending sid skipped, new sid and errored sid sent", sorted(sid for sid, _ in second[len(first):]) == ["err", "late"], second)
+
+s = FakeSessions(["a"], {"a": None})
+try:
+    asyncio.run(asyncio.wait_for(once_per_session(s), 0.5))
+    r = "returned"
+except asyncio.TimeoutError:
+    r = "timeout"
+check("once per session: nothing new to send parks the call, no hang of the caller", r == "returned" and [sid for sid, _ in s.sent] == ["a"], (r, s.sent))
+
+s = FakeSessions(["a", "b"], {"a": None, "b": None})
+r = asyncio.run(mod._ask_with_rearm(
+    mod._once_per_session_call(s.list_sids, s.send_to), PAYLOAD, 0.25, 0.05,
+))
+check("once per session under rearm: each sid sent exactly once until the wait ends", r == {"error": mod._ASK_USER_TIMED_OUT} and sorted(sid for sid, _ in s.sent) == ["a", "b"] and s.calls >= 3, (r, s.sent, s.calls))
+
+# Answer and re-arm tick deliberately unaligned: a tick in the same loop
+# iteration as the answer creates one re-send that is cancelled at once.
+s = FakeSessions(["a", "b"], {"a": None, "b": (0.08, answered)})
+r = asyncio.run(mod._ask_with_rearm(
+    mod._once_per_session_call(s.list_sids, s.send_to), PAYLOAD, 5.0, 0.03,
+))
+check("once per session under rearm: an answer from the first send settles after re-sends parked", r == answered and sorted(sid for sid, _ in s.sent) == ["a", "b"] and s.cancelled == ["a"], (r, s.sent, s.cancelled))
+
+
+# ---- Conduit's 120 s auto-cancel is recognised by its timing, not taken as a decline ----
+def once(sessions, origin=None):
+    return mod._once_per_session_call(sessions.list_sids, sessions.send_to, origin)
+
+
+def with_fast_expiry(fn):
+    saved = (mod._ASK_USER_CONDUIT_EXPIRY_S, mod._ASK_USER_CONDUIT_EXPIRY_WINDOW_S)
+    mod._ASK_USER_CONDUIT_EXPIRY_S, mod._ASK_USER_CONDUIT_EXPIRY_WINDOW_S = 0.1, 0.05
+    try:
+        return fn()
+    finally:
+        mod._ASK_USER_CONDUIT_EXPIRY_S, mod._ASK_USER_CONDUIT_EXPIRY_WINDOW_S = saved
+
+
+EXPIRED = {"status": "cancelled", "expired": True}
+check("expired cancel never settles, even alone", not mod._ask_output_settles(EXPIRED, False))
+check("cancel outside the expiry window is a decline", not mod._expired_cancel(CANCELLED, 5.0) and mod._expired_cancel(CANCELLED, 118.0) and mod._expired_cancel(CANCELLED, 134.0) and not mod._expired_cancel(CANCELLED, 140.0))
+
+s = FakeSessions(["web", "conduit"], {"web": (0.25, answered), "conduit": (0.1, CANCELLED)})
+r = with_fast_expiry(lambda: asyncio.run(mod._ask_with_rearm(once(s, "conduit"), PAYLOAD, 5.0, 1.0)))
+check("expiry-timed cancel from the origin: web send kept, web answer wins", r == answered and "web" not in s.cancelled, (r, s.cancelled))
+
+s = FakeSessions(["web", "conduit"], {"web": (0.3, answered), "conduit": [(0.1, CANCELLED), None]})
+r = with_fast_expiry(lambda: asyncio.run(mod._ask_with_rearm(once(s), PAYLOAD, 5.0, 0.04)))
+check("expired session gets the form back on the next re-send, web answer still wins", r == answered and [sid for sid, _ in s.sent].count("conduit") == 2 and [sid for sid, _ in s.sent].count("web") == 1, (r, s.sent))
+
+s = FakeSessions(["web", "conduit"], {"web": None, "conduit": (0.01, CANCELLED)})
+r = with_fast_expiry(lambda: asyncio.run(mod._ask_with_rearm(once(s), PAYLOAD, 5.0, 1.0)))
+check("cancel well before the expiry is the user declining: final, web send cancelled", r == CANCELLED and s.cancelled == ["web"], (r, s.cancelled))
+
+s = FakeSessions(["conduit"], {"conduit": [(0.1, CANCELLED), (0.02, answered)]})
+r = with_fast_expiry(lambda: asyncio.run(mod._ask_with_rearm(once(s), PAYLOAD, 5.0, 0.04)))
+check("lone session: expiry cancel, re-send, later answer wins", r == answered and [sid for sid, _ in s.sent] == ["conduit", "conduit"], (r, s.sent))
+
+s = FakeSessions(["conduit"], {"conduit": (0.1, CANCELLED)})
+r = with_fast_expiry(lambda: asyncio.run(mod._ask_with_rearm(once(s), PAYLOAD, 0.3, 0)))
+check("lone session, rearm disabled: expiry cancel runs the wait out as timed out", r == {"error": mod._ASK_USER_TIMED_OUT} and len(s.sent) == 1, (r, s.sent))
+
 # ---- reply mapping ----
 r = mod._map_user_input_response({"answers": {"q1": "Only auth", "busy": " Retry "}}, norm)
 check("answers mapped and stripped", r == {"status": "answered", "answers": {"q1": "Only auth", "busy": "Retry"}}, r)
@@ -385,6 +518,10 @@ check("form option object → its label", r["answers"]["q1"] == "Auth and sessio
 check("form other object → its text, stripped", r["answers"]["busy"] == "wait 5 min", r)
 r = mod._map_user_input_response({"answers": {"q1": {"type": "other", "text": "  "}}}, norm)
 check("blank other text → unanswered", r["status"] == "unanswered")
+r = mod._map_user_input_response({"typed": "1b, 2a"}, norm)
+check("typed chat answer → answered with the text and the typed instruction", r == {"status": "answered", "typed": "1b, 2a", "instruction": mod._ASK_USER_TYPED_INSTRUCTION}, r)
+r = mod._map_user_input_response({"typed": "  "}, norm)
+check("blank typed → not treated as an answer", r["status"] == "unanswered", r)
 for name, out in [
     ("cancelled", {"status": "cancelled"}),
     ("non-dict", None),
