@@ -4,6 +4,14 @@ Patches on top of [tfriedel/openwebui-claude-code](https://github.com/tfriedel/o
 commit `5bbc1fc`, in the order they landed. Numbering matches the pipe's own
 comments and the pull requests that introduced them.
 
+## Unreleased
+
+- The chat's **Reasoning Effort** field (Controls > Advanced Params) now
+  sets the agent's effort level for that chat: `low`, `medium`, `high`,
+  `xhigh` or `max`. A `/effort <level>` message prefix still overrides it
+  for one turn, and the `EFFORT` valve stays the default when the field is
+  empty or holds a level Claude doesn't have.
+
 ## v0.3.7 (2026-09-29)
 
 - `REMOTE_MCP_SERVERS` entries now reach Claude Code through a per-turn

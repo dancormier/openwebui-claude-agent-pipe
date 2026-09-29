@@ -58,7 +58,7 @@ repo is where the idea came from.
   `SETTING_SOURCES` includes `project`).
 - **Output redaction** — API keys, tokens and private keys are scrubbed from
   the reply stream and status events before they reach the chat database.
-- **Effort, budget, fallback** — per-turn `/effort <level>`, a task token
+- **Effort, budget, fallback** — per-chat Reasoning Effort or per-turn `/effort <level>`, a task token
   budget the model paces itself against, and a fallback model.
 
 ## Requirements

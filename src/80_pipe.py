@@ -173,8 +173,10 @@
             default="",
             description=(
                 "Default effort level for agent turns: low|medium|high|xhigh|"
-                "max. Empty = SDK default (high). A message starting with "
-                "'/effort <level>' overrides it for that turn."
+                "max. Empty = SDK default (high). The chat's Reasoning Effort "
+                "field (Controls > Advanced Params) overrides it for that "
+                "chat; a message starting with "
+                "'/effort <level>' overrides both for that turn."
             ),
         )
         TASK_BUDGET_TOKENS: int = Field(
@@ -661,8 +663,10 @@
             )
         if mcp_servers:
             options_kwargs["mcp_servers"] = mcp_servers
-        effort = effort_override or self.valves.EFFORT.strip().lower() or None
-        if effort in _EFFORT_LEVELS:
+        effort = _resolve_effort(
+            effort_override, body.get("reasoning_effort"), self.valves.EFFORT
+        )
+        if effort:
             options_kwargs["effort"] = effort
         if self.valves.TASK_BUDGET_TOKENS >= 20_000:
             options_kwargs["task_budget"] = {

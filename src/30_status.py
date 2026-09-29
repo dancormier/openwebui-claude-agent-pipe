@@ -203,3 +203,13 @@ def _extract_effort_prefix(prompt: str) -> Tuple[Optional[str], str]:
     return m.group(1).lower(), stripped[m.end():].lstrip()
 
 
+def _resolve_effort(*candidates: Any) -> Optional[str]:
+    """First valid level among the candidates, in precedence order. Open WebUI's
+    per-chat Reasoning Effort field is free text meant for OpenAI models, so a
+    value like "minimal" is skipped rather than blocking the valve default."""
+    for value in candidates:
+        if isinstance(value, str) and value.strip().lower() in _EFFORT_LEVELS:
+            return value.strip().lower()
+    return None
+
+
