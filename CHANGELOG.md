@@ -12,6 +12,15 @@ comments and the pull requests that introduced them.
   for one turn, and the `EFFORT` valve stays the default when the field is
   empty or holds a level Claude doesn't have.
 
+## v0.3.7 (2026-09-29)
+
+- `REMOTE_MCP_SERVERS` entries now reach Claude Code through a per-turn
+  0600 file under `<WORKDIR_ROOT>/.mcp/`, deleted when the turn ends,
+  instead of the SDK's inline `--mcp-config` JSON. The inline form put
+  every bearer header on the CLI's command line, where `ps` from any tool
+  call could read it: a subagent did exactly that on 2026-09-21 and wrote a
+  live Linear key into its transcript.
+
 ## v0.3.6 (2026-09-23)
 
 - Audio files (`.mp3`, `.wav`, `.m4a`) an agent writes into the chat
