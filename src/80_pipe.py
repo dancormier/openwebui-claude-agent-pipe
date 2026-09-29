@@ -113,15 +113,17 @@
             le=_ASK_USER_REARM_SECONDS_MAX,
             description=(
                 "Re-send an unanswered ask_user form every N seconds "
-                "(10-110; 0 disables). Each send goes to every live session "
-                "of the user, so a tab or device opened after the form "
-                "fired gets it on the next re-send. The web client drops a "
-                "form that arrives while the chat is not open or the reply "
-                "is not yet in view, and never says so; the re-send is what "
-                "puts it back. A re-send resets a form the user is part-way "
-                "through answering, so keep this well above the time an "
-                "answer takes. The ceiling keeps a re-send ahead of Conduit's "
-                "2-minute form expiry."
+                "(10-110; 0 disables). A re-send reaches only the sessions "
+                "that have not yet received the form (a tab or device opened "
+                "after it fired), so a form already on screen is never "
+                "replaced and a half-typed answer survives. The web client "
+                "drops a form that arrives while the chat is not open or the "
+                "reply is not yet in view, and never says so; the questions "
+                "are also streamed into the reply, and an answer typed into "
+                "the chat is delivered to the waiting form. Conduit dismisses "
+                "its form after 2 minutes; that cancel is recognised by its "
+                "timing and the form goes back to that session at the next "
+                "re-send."
             ),
         )
         SESSION_SEARCH: bool = Field(
@@ -322,9 +324,19 @@
         turn_info: Dict[str, Any] = {}
         emitted_parts: List[str] = []
 
+        # Same trimming `_pipe_stream` applies, so "/agent 1b" answers as
+        # "1b". A message with attachments is a new turn: the form cannot
+        # carry a file, and the agent needs it.
+        _, typed_text = _extract_effort_prefix(
+            _strip_mode_prefix(_extract_latest_user_prompt(body))
+        )
+        if __chat_id__ and not __files__ and _deliver_typed_answer(__chat_id__, typed_text):
+            yield "_Sent as your answer to the questions above; the reply continues there._"
+            return
+
         inflight: Optional[_InflightTurn] = None
         if __chat_id__:
-            inflight, superseded = await _claim_chat(__chat_id__)
+            inflight, superseded = await _claim_chat(__chat_id__, prompt=typed_text)
             if superseded and __event_emitter__ is not None:
                 await __event_emitter__({
                     "type": "status",
@@ -617,6 +629,7 @@
                 ),
                 self.valves.ASK_USER_WAIT_MINUTES,
                 self.valves.ASK_USER_REARM_SECONDS,
+                inflight=inflight,
             )
             mcp_servers["ask-user"] = ask_server
             allowed_tools = allowed_tools + ask_tool_names

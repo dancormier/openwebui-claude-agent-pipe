@@ -4,6 +4,21 @@ Patches on top of [tfriedel/openwebui-claude-code](https://github.com/tfriedel/o
 commit `5bbc1fc`, in the order they landed. Numbering matches the pipe's own
 comments and the pull requests that introduced them.
 
+## v0.3.9 (2026-09-29)
+
+- `ask_user` now streams its questions into the reply when the form fires,
+  so a chat switched away and back still shows what was asked (the web
+  client drops the form itself when the chat is not on screen).
+- A message typed into the chat while a form is pending is delivered as the
+  answer instead of stopping the turn; the agent reads it against the
+  numbered questions and lettered options. A form still showing after a
+  typed answer can be ignored: submitting it does nothing. An answer sent
+  with an attachment starts a new turn instead.
+- The form is sent once per session, and a re-send reaches only sessions
+  that have not yet received it (new tabs or devices), so an open form is
+  never replaced and a half-typed answer is no longer wiped every
+  `ASK_USER_REARM_SECONDS`.
+
 ## v0.3.8 (2026-09-29)
 
 - The chat's **Reasoning Effort** field (Controls > Advanced Params) now

@@ -109,6 +109,23 @@ check("tool use not inline: status only", chunks == [] and status == "🔧 Bash:
 chunks, status = mod._on_tool_use("Mystery", {}, "t3", st, True, 102.0)
 check("unknown tool, no input: bare name", status == "🔧 Mystery" and "<summary>🔧 Mystery</summary>" in chunks[0], status)
 
+# ---- ask_user: the questions stream into the reply, form or no form ----
+ASK_Q = {"questions": [
+    {"header": "Scope", "question": "Which files?", "options": ["Only auth", "All"]},
+]}
+ask_st = mod._TurnState()
+for inline in (True, False):
+    chunks, status = mod._on_tool_use(mod._ASK_USER_TOOL, ASK_Q, f"a{inline}", ask_st, inline, 200.0)
+    visible = [c for c in chunks if "<details>" not in c]
+    check(f"ask_user inline={inline}: questions yielded outside any details block",
+          len(visible) == 1 and "Which files?" in visible[0] and "(a) Only auth" in visible[0] and "Reply with your picks" in visible[0], chunks)
+    check(f"ask_user inline={inline}: chunk is its own paragraph",
+          visible[0].startswith("\n\n") and visible[0].endswith("\n\n"), visible[0][:4])
+chunks, _ = mod._on_tool_use("Bash", {"command": "ls"}, "b1", ask_st, False, 201.0)
+check("bash not inline still yields nothing", chunks == [], chunks)
+chunks, status = mod._on_tool_use(mod._ASK_USER_TOOL, {"questions": "junk"}, "a3", ask_st, True, 202.0)
+check("ask_user malformed: no question chunk, no raise", all("<details>" in c for c in chunks) and status.startswith("🔧 "), chunks)
+
 # ---- heartbeat label ----
 label, elapsed = mod._heartbeat_label(st.active_tools, 110.0)
 check("heartbeat: multiple tools names count and oldest", label == "3 tools · longest Bash: ls -la" and elapsed == 10, label)

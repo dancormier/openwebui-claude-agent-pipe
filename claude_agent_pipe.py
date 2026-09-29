@@ -2,7 +2,7 @@
 title: Claude Code
 description: Run Claude Code's agent loop from inside OpenWebUI chats via the Claude Agent SDK.
 author: Thomas Friedel, Dan Cormier
-version: 0.3.8
+version: 0.3.9
 license: MIT
 requirements: claude-agent-sdk>=0.2.152
 """
@@ -738,13 +738,21 @@ _ASK_USER_WAIT_MINUTES_MAX = 240
 # The web client renders the event only if that chat is open and the reply
 # message is already in its local store; otherwise it drops it silently and
 # never acknowledges (a form sent the same second the chat was re-opened
-# was lost, 2026-09-17). Re-sending the same event resets the same form, so
-# a periodic re-send is what gets a dropped form in front of the user. Each
-# re-send re-enumerates the user's sessions, so a tab or device opened after
-# the form first fired gets it on the next re-arm.
+# was lost, 2026-09-17). A periodic re-send is what gets the form in front
+# of a tab or device opened after it first fired: each re-send re-enumerates
+# the user's sessions and sends only to those with no send still pending,
+# because a second copy replaces the form a client already shows (Conduit
+# cancels and re-renders, the web client resets it) and a half-typed answer
+# with it (2026-09-29).
 _ASK_USER_REARM_SECONDS = 60
 _ASK_USER_REARM_SECONDS_MIN = 10
-# Conduit expires a form at 120 s on its own; a re-send replaces it first.
+# Conduit dismisses its form 120 s after rendering it and acks the same
+# cancel shape as a user tap. Nothing tells a Conduit session from a web one,
+# so a cancel whose send is about that old is read as the expiry, not a
+# decline, and the form goes back to that session at the next re-send; a
+# real tap inside the window costs one extra form, nothing worse.
+_ASK_USER_CONDUIT_EXPIRY_S = 120.0
+_ASK_USER_CONDUIT_EXPIRY_WINDOW_S = 15.0
 _ASK_USER_REARM_SECONDS_MAX = 110
 _ASK_USER_TIMED_OUT = "Event call timed out: the form never answered."
 _ASK_USER_UNANSWERED_INSTRUCTION = (
@@ -761,6 +769,13 @@ _ASK_USER_NO_UI_INSTRUCTION = (
     "This client has no question form. Put the ask_in_reply text in your "
     "reply verbatim, then end the turn without doing the work; the user's "
     "next message carries the answers."
+)
+_ASK_USER_TYPED_INSTRUCTION = (
+    "The user answered in the chat as text instead of the form. Read "
+    "`typed` against the numbered questions and lettered options: it may "
+    "be picks like \"1b, 2a\" or plain prose. If it does not resolve a "
+    "question, ask a brief follow-up in text rather than guessing. Do not "
+    "call ask_user again for the same questions."
 )
 
 
@@ -873,7 +888,10 @@ def _ask_output_settles(output: Any, others_pending: bool) -> bool:
     one send says nothing about a later re-send still in flight
     (WEBSOCKET_EVENT_CALLER_TIMEOUT below the valve ages the first call out
     before the pipe's own wait does), so it is ignored while others remain;
-    every other outcome — answers, cancel, a dead session — is final."""
+    a cancel timed like Conduit's form expiry is never final; every other
+    outcome — answers, a real cancel, a dead session — is."""
+    if _ask_output_expired(output):
+        return False
     if others_pending and isinstance(output, dict):
         reason = str(output.get("error") or "")
         if reason and "timed out" in reason.lower():
@@ -881,12 +899,19 @@ def _ask_output_settles(output: Any, others_pending: bool) -> bool:
     return True
 
 
+def _ask_output_expired(output: Any) -> bool:
+    return isinstance(output, dict) and output.get("status") == "cancelled" and bool(output.get("expired"))
+
+
+def _expired_cancel(output: Any, elapsed: float) -> bool:
+    return (
+        isinstance(output, dict) and output.get("status") == "cancelled"
+        and abs(elapsed - _ASK_USER_CONDUIT_EXPIRY_S) <= _ASK_USER_CONDUIT_EXPIRY_WINDOW_S
+    )
+
+
 def _ask_output_answered(output: Any) -> bool:
     return isinstance(output, dict) and isinstance(output.get("answers"), dict) and bool(output["answers"])
-
-
-def _ask_output_cancelled(output: Any) -> bool:
-    return isinstance(output, dict) and output.get("status") == "cancelled"
 
 
 def _task_output(task: "asyncio.Task") -> Any:
@@ -901,61 +926,84 @@ def _task_output(task: "asyncio.Task") -> Any:
 async def _ask_with_rearm(
     event_call: Callable, payload: Dict[str, Any],
     wait_seconds: float, rearm_seconds: float,
+    typed: Optional["asyncio.Future"] = None,
 ) -> Any:
     """Send the form, re-send it every rearm_seconds until something
     answers, and give up at wait_seconds with the timed-out error shape.
-    Every send still in flight is cancelled before returning, so no socket
-    call outlives the tool."""
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + wait_seconds
+    `typed` is the turn's slot for an answer typed into the chat instead of
+    the form; once it resolves the wait ends with {"typed": text}. Every
+    send still in flight is cancelled before returning, so no socket call
+    outlives the tool; `typed` is never cancelled here, it belongs to the
+    turn."""
     tasks: List["asyncio.Task"] = [asyncio.ensure_future(event_call(payload))]
     try:
-        while True:
-            remaining = deadline - loop.time()
-            if remaining <= 0:
-                return {"error": _ASK_USER_TIMED_OUT}
-            pending = [t for t in tasks if not t.done()]
-            if not pending:
-                if not rearm_seconds:
-                    return {"error": _ASK_USER_TIMED_OUT}
-                pending = [asyncio.ensure_future(event_call(payload))]
-                tasks.append(pending[0])
-            timeout = min(remaining, rearm_seconds) if rearm_seconds else remaining
-            done, _ = await asyncio.wait(
-                pending, timeout=timeout, return_when=asyncio.FIRST_COMPLETED
-            )
-            # Two sends can land in one batch; `done` is a set, so a stale
-            # timeout must never win over the answers sitting next to it.
-            # Conduit acks the old call with `cancelled` when a re-send
-            # replaces its form, so a cancel from anything but the latest
-            # send is the client swapping forms, not the user declining.
-            done_in_order = sorted(done, key=tasks.index)
-            outputs = [_task_output(t) for t in done_in_order]
-            for output in outputs:
-                if _ask_output_answered(output):
-                    return output
-            for task, output in zip(done_in_order, outputs):
-                if _ask_output_cancelled(output) and task is not tasks[-1]:
-                    continue
-                if _ask_output_settles(output, True):
-                    return output
-            if outputs and not any(not t.done() for t in tasks):
-                return _task_output(tasks[-1])
-            # Every cancelled send leaves its ack callback registered in
-            # python-socketio's manager until the client acks or disconnects
-            # (socketio/async_server.py `call`, base_manager.py), so each
-            # re-send costs one entry per live session for the life of that
-            # session: ~30 per session per unanswered form at the defaults,
-            # cleared on disconnect. That is why the interval floor is 10 s
-            # and the default 60 s.
-            if not done and rearm_seconds:
-                tasks.append(asyncio.ensure_future(event_call(payload)))
+        output = await _rearm_loop(event_call, payload, wait_seconds, rearm_seconds, typed, tasks)
     finally:
         leftover = [t for t in tasks if not t.done()]
         for task in leftover:
             task.cancel()
         if leftover:
             await asyncio.gather(*leftover, return_exceptions=True)
+    # The gather above yields to the loop, so a message typed in that gap
+    # resolved `typed` after the form had already answered; the typed text
+    # is the user's later, deliberate word and the chat told them it was
+    # sent, so it wins.
+    if typed is not None and typed.done():
+        return {"typed": typed.result()}
+    return output
+
+
+async def _rearm_loop(
+    event_call: Callable, payload: Dict[str, Any],
+    wait_seconds: float, rearm_seconds: float,
+    typed: Optional["asyncio.Future"], tasks: List["asyncio.Task"],
+) -> Any:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + wait_seconds
+    while True:
+        if typed is not None and typed.done():
+            return {"typed": typed.result()}
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            return {"error": _ASK_USER_TIMED_OUT}
+        pending = [t for t in tasks if not t.done()]
+        if not pending:
+            if not rearm_seconds:
+                return {"error": _ASK_USER_TIMED_OUT}
+            pending = [asyncio.ensure_future(event_call(payload))]
+            tasks.append(pending[0])
+        timeout = min(remaining, rearm_seconds) if rearm_seconds else remaining
+        waiters = pending + ([typed] if typed is not None else [])
+        done, _ = await asyncio.wait(
+            waiters, timeout=timeout, return_when=asyncio.FIRST_COMPLETED
+        )
+        if typed is not None and typed.done():
+            return {"typed": typed.result()}
+        # Two sends can land in one batch; `done` is a set, so a stale
+        # timeout must never win over the answers sitting next to it.
+        done_in_order = sorted(done, key=tasks.index)
+        outputs = [_task_output(t) for t in done_in_order]
+        for output in outputs:
+            if _ask_output_answered(output):
+                return output
+        for output in outputs:
+            if _ask_output_settles(output, True):
+                return output
+        # Everything done and unsettled: the latest outcome stands,
+        # unless it is Conduit's expiry cancel, which only means that
+        # session needs the form again on the next send.
+        if outputs and not any(not t.done() for t in tasks):
+            last = _task_output(tasks[-1])
+            if not _ask_output_expired(last):
+                return last
+        # A send leaves its ack callback registered in python-socketio's
+        # manager until the client acks or disconnects
+        # (socketio/async_server.py `call`, base_manager.py). Sends go
+        # once per session, so that is one entry per session per form;
+        # a re-send that finds no new session only parks a task until
+        # the wait ends. The interval floor of 10 s bounds both.
+        if not done and rearm_seconds:
+            tasks.append(asyncio.ensure_future(event_call(payload)))
 
 
 async def _fan_out_call(
@@ -970,8 +1018,11 @@ async def _fan_out_call(
     that were never looking. The same error from any other sid says nothing
     about the one the user is typing in, so it is ignored while others
     pend; all-failed returns the origin's error, else the first in sid
-    order. No sids at all is not a verdict either: every session may be
-    mid-reconnect, so the call parks until the re-arm loop cancels it."""
+    order. A cancel timed like Conduit's own form expiry is no verdict from
+    any sid, the origin included: it waits like an error and, once nothing
+    else pends, comes back still tagged so the caller can re-arm. No sids
+    at all is not a verdict either: every session may be mid-reconnect, so
+    the call parks until the re-arm loop cancels it."""
     sids = list(list_sids() or [])
     tasks: List["asyncio.Task"] = [
         asyncio.ensure_future(send_to(sid, payload)) for sid in sids
@@ -987,14 +1038,17 @@ async def _fan_out_call(
             done, _ = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
             for task in done:
                 output = _task_output(task)
-                if not isinstance(output, dict):
+                if not isinstance(output, dict) or _ask_output_expired(output):
                     continue
                 if not output.get("error") or task is by_sid.get(origin_sid):
                     return output
         origin = by_sid.get(origin_sid)
         ordered = ([origin] if origin is not None else []) + tasks
-        for task in ordered:
-            output = _task_output(task)
+        outputs = [_task_output(t) for t in ordered]
+        for output in outputs:
+            if _ask_output_expired(output):
+                return output
+        for output in outputs:
             if isinstance(output, dict) and output.get("error"):
                 return output
         return _task_output(tasks[0])
@@ -1004,6 +1058,39 @@ async def _fan_out_call(
             task.cancel()
         if leftover:
             await asyncio.gather(*leftover, return_exceptions=True)
+
+
+def _once_per_session_call(
+    list_sids: Callable[[], List[str]], send_to: Callable,
+    origin_sid: Optional[str] = None,
+) -> Callable:
+    """An event_call for one ask: each invocation fans out to the sessions
+    that hold no send still pending, so a form a client already shows is
+    never replaced by a re-send (that is what wiped a half-typed answer).
+    A session whose earlier send finished — an error, a server timeout — is
+    eligible again; one that appeared since the last send gets the form for
+    the first time. The earlier invocation keeps awaiting its own sends, so
+    an answer from a session skipped here still settles the ask."""
+    pending: Dict[str, "asyncio.Task"] = {}
+
+    def fresh_sids() -> List[str]:
+        return [
+            sid for sid in (list_sids() or [])
+            if sid not in pending or pending[sid].done()
+        ]
+
+    async def tracked_send(sid: str, payload: Dict[str, Any]) -> Any:
+        pending[sid] = asyncio.current_task()
+        started = asyncio.get_running_loop().time()
+        output = await send_to(sid, payload)
+        if _expired_cancel(output, asyncio.get_running_loop().time() - started):
+            return {**output, "expired": True}
+        return output
+
+    async def event_call(payload: Dict[str, Any]) -> Any:
+        return await _fan_out_call(fresh_sids, tracked_send, payload, origin_sid)
+
+    return event_call
 
 
 def _answer_text(value: Any) -> str:
@@ -1027,10 +1114,16 @@ def _map_user_input_response(
     means the form never reached them — a client that holds a socket
     session but rejects the payload (Conduit answers a free-text-only
     question with "Invalid user input request.", verified 2026-09-18), or
-    a dropped session — so the questions fall through to the no-form path."""
+    a dropped session — so the questions fall through to the no-form path.
+    A `typed` text is an answer the user sent as a chat message while the
+    form was pending; it is handed over as is, for the agent to read."""
     if not isinstance(output, dict):
         return {"status": "unanswered", "reason": "no response",
                 "instruction": _ASK_USER_UNANSWERED_INSTRUCTION}
+    typed = output.get("typed")
+    if isinstance(typed, str) and typed.strip():
+        return {"status": "answered", "typed": typed,
+                "instruction": _ASK_USER_TYPED_INSTRUCTION}
     if output.get("error"):
         reason = str(output["error"])
         if "timed out" in reason.lower():
@@ -1309,6 +1402,16 @@ def _on_tool_use(
             f"{_tool_input_block(name, tool_input)}\n\n"
             "</details>\n\n"
         )
+    if name == _ASK_USER_TOOL:
+        # The form is lost if the chat is not on screen, but streamed text
+        # is replayed when the chat is reopened; this is what tells the
+        # user what was asked, and that a typed reply answers it.
+        try:
+            questions = _normalize_questions(tool_input.get("questions"))
+        except ValueError:
+            questions = []
+        if questions:
+            chunks.append("\n\n" + _render_questions_markdown(questions) + "\n\n")
     return chunks, f"🔧 {label}"
 
 
@@ -1406,6 +1509,10 @@ class _InflightTurn:
         self.interrupt: Optional[Callable[[], Any]] = None
         self.superseded = False
         self.stopped_previous = False
+        # Set by ask_user while its form is pending: a message typed into
+        # the chat then resolves this instead of stopping the turn.
+        self.pending_ask: Optional["asyncio.Future"] = None
+        self.prompt = ""
 
 
 # chat_id -> the turn currently running there. Open WebUI's native UI blocks
@@ -1419,11 +1526,12 @@ _INFLIGHT_WAIT_S = 30.0
 
 
 async def _claim_chat(
-    chat_id: str, wait_s: float = _INFLIGHT_WAIT_S
+    chat_id: str, wait_s: float = _INFLIGHT_WAIT_S, prompt: str = ""
 ) -> Tuple[_InflightTurn, bool]:
     """Register the caller as the chat's live turn. A turn already running
     there is asked to stop and given `wait_s` to exit; the flag says whether
-    one had to be stopped."""
+    one had to be stopped. `prompt` is the message that started this turn,
+    kept so a regenerate of it is not mistaken for a typed answer."""
     prev = _inflight.get(chat_id)
     superseded = False
     if prev is not None and not prev.done.is_set():
@@ -1444,6 +1552,7 @@ async def _claim_chat(
             )
     entry = _InflightTurn()
     entry.stopped_previous = superseded
+    entry.prompt = prompt.strip()
     _inflight[chat_id] = entry
     return entry, superseded
 
@@ -1459,6 +1568,22 @@ _OVERLAP_NOTE = (
 
 def _with_overlap_note(prompt: str) -> str:
     return prompt + "\n\n" + _OVERLAP_NOTE
+
+
+def _deliver_typed_answer(chat_id: str, text: str) -> bool:
+    """Hand a typed message to the form waiting in the chat's live turn.
+    False when nothing is waiting, so the caller runs it as a new turn.
+    Regenerate and retry re-send the message that started the turn; that
+    text is never an answer, it is the old interrupt-and-redo."""
+    entry = _inflight.get(chat_id)
+    text = text.strip()
+    if entry is None or entry.done.is_set() or not text or text == entry.prompt:
+        return False
+    fut = entry.pending_ask
+    if fut is None or fut.done():
+        return False
+    fut.set_result(text)
+    return True
 
 
 def _release_chat(chat_id: str, entry: _InflightTurn) -> None:
@@ -2462,18 +2587,30 @@ def _fan_out_event_call(
     user_id: Optional[str], chat_id: Optional[str], message_id: Optional[str],
     fallback: Optional[Callable], origin_sid: Optional[str] = None,
 ) -> Optional[Callable]:
-    """An event_call that reaches every live session of the user instead of
-    the one sid Open WebUI's `__event_call__` is bound to. Falls back to the
-    given call outside Open WebUI (head-slice tests) or without the ids the
-    frame needs."""
+    """A factory of event_calls that reach every live session of the user
+    instead of the one sid Open WebUI's `__event_call__` is bound to. Each
+    ask takes a fresh call from it, so the once-per-session bookkeeping
+    (which sids already hold the form) starts empty per form. Falls back to
+    the given call outside Open WebUI (head-slice tests) or without the ids
+    the frame needs, wrapped the same way so even that sid is sent the form
+    once."""
+    if fallback is not None:
+        origin = origin_sid or "origin"
+
+        async def send_fallback(sid: str, payload: Dict[str, Any]) -> Any:
+            return await fallback(payload)
+
+        def make_fallback() -> Callable:
+            return _once_per_session_call(lambda: [origin], send_fallback, origin)
+
     if not (user_id and chat_id and message_id):
-        return fallback
+        return make_fallback if fallback is not None else None
     try:
         from open_webui.socket.main import sio, SESSION_POOL, get_session_ids_by_user_id
         from open_webui.env import WEBSOCKET_EVENT_CALLER_TIMEOUT
     except ImportError as exc:
         log.debug("ask_user fan-out unavailable, using the single-sid call: %s", exc)
-        return fallback
+        return make_fallback if fallback is not None else None
     timeout_errors: Tuple[type, ...] = (TimeoutError,)
     try:
         import socketio
@@ -2504,21 +2641,23 @@ def _fan_out_event_call(
         except timeout_errors:
             return {"error": "Event call timed out. The browser tab may be inactive or closed."}
 
-    async def event_call(payload: Dict[str, Any]) -> Any:
-        return await _fan_out_call(list_sids, send_to, payload, origin_sid)
+    def make_event_call() -> Callable:
+        return _once_per_session_call(list_sids, send_to, origin_sid)
 
-    return event_call
+    return make_event_call
 
 
 def _build_ask_user_mcp_server(
-    event_call: Optional[Callable],
+    make_event_call: Optional[Callable[[], Callable]],
     wait_minutes: int = _ASK_USER_WAIT_MINUTES,
     rearm_seconds: int = _ASK_USER_REARM_SECONDS,
+    inflight: Optional[_InflightTurn] = None,
 ):
     """Return (mcp_config, tool_names) for the ask_user tool. Registered even
-    without an event_call: the tool then hands the questions back as markdown
-    for the agent to ask in its reply, so clients with no form still get
-    asked instead of guessed at."""
+    without an event_call factory: the tool then hands the questions back as
+    markdown for the agent to ask in its reply, so clients with no form still
+    get asked instead of guessed at. With the turn's in-flight entry, a
+    message typed into the chat while the form is pending answers it."""
 
     @tool(
         "ask_user",
@@ -2591,15 +2730,24 @@ def _build_ask_user_mcp_server(
                 "content": [{"type": "text", "text": f"ask_user: {exc}"}],
                 "is_error": True,
             }
-        if event_call is None:
+        if make_event_call is None:
             result = _no_ui_result(questions)
         else:
             payload = _user_input_payload(questions)
-            output = await _ask_with_rearm(
-                event_call, payload,
-                _ask_user_wait_seconds(wait_minutes),
-                _ask_user_rearm_seconds(rearm_seconds),
-            )
+            typed = None
+            if inflight is not None:
+                typed = asyncio.get_running_loop().create_future()
+                inflight.pending_ask = typed
+            try:
+                output = await _ask_with_rearm(
+                    make_event_call(), payload,
+                    _ask_user_wait_seconds(wait_minutes),
+                    _ask_user_rearm_seconds(rearm_seconds),
+                    typed=typed,
+                )
+            finally:
+                if inflight is not None:
+                    inflight.pending_ask = None
             if isinstance(output, dict) and output.get("error"):
                 log.warning("ask_user form not answered: %s", output["error"])
             result = _map_user_input_response(output, questions)
@@ -3057,15 +3205,17 @@ class Pipe:
             le=_ASK_USER_REARM_SECONDS_MAX,
             description=(
                 "Re-send an unanswered ask_user form every N seconds "
-                "(10-110; 0 disables). Each send goes to every live session "
-                "of the user, so a tab or device opened after the form "
-                "fired gets it on the next re-send. The web client drops a "
-                "form that arrives while the chat is not open or the reply "
-                "is not yet in view, and never says so; the re-send is what "
-                "puts it back. A re-send resets a form the user is part-way "
-                "through answering, so keep this well above the time an "
-                "answer takes. The ceiling keeps a re-send ahead of Conduit's "
-                "2-minute form expiry."
+                "(10-110; 0 disables). A re-send reaches only the sessions "
+                "that have not yet received the form (a tab or device opened "
+                "after it fired), so a form already on screen is never "
+                "replaced and a half-typed answer survives. The web client "
+                "drops a form that arrives while the chat is not open or the "
+                "reply is not yet in view, and never says so; the questions "
+                "are also streamed into the reply, and an answer typed into "
+                "the chat is delivered to the waiting form. Conduit dismisses "
+                "its form after 2 minutes; that cancel is recognised by its "
+                "timing and the form goes back to that session at the next "
+                "re-send."
             ),
         )
         SESSION_SEARCH: bool = Field(
@@ -3266,9 +3416,19 @@ class Pipe:
         turn_info: Dict[str, Any] = {}
         emitted_parts: List[str] = []
 
+        # Same trimming `_pipe_stream` applies, so "/agent 1b" answers as
+        # "1b". A message with attachments is a new turn: the form cannot
+        # carry a file, and the agent needs it.
+        _, typed_text = _extract_effort_prefix(
+            _strip_mode_prefix(_extract_latest_user_prompt(body))
+        )
+        if __chat_id__ and not __files__ and _deliver_typed_answer(__chat_id__, typed_text):
+            yield "_Sent as your answer to the questions above; the reply continues there._"
+            return
+
         inflight: Optional[_InflightTurn] = None
         if __chat_id__:
-            inflight, superseded = await _claim_chat(__chat_id__)
+            inflight, superseded = await _claim_chat(__chat_id__, prompt=typed_text)
             if superseded and __event_emitter__ is not None:
                 await __event_emitter__({
                     "type": "status",
@@ -3561,6 +3721,7 @@ class Pipe:
                 ),
                 self.valves.ASK_USER_WAIT_MINUTES,
                 self.valves.ASK_USER_REARM_SECONDS,
+                inflight=inflight,
             )
             mcp_servers["ask-user"] = ask_server
             allowed_tools = allowed_tools + ask_tool_names
