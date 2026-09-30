@@ -149,6 +149,11 @@ example a subdirectory of a bind-mounted `WORKDIR_ROOT`). The Claude Code
 CLI keeps its session transcripts there; left at the default they live in
 the container's `$HOME/.claude` and vanish when the image is recreated.
 
+Chat titles, tags and follow-up suggestions come from Open WebUI's Task
+Model (Admin → Settings → Interface). With none set, Open WebUI asks the
+chat's own model, and the pipe answers with one short tool-less call on
+`TASK_MODEL` (Haiku by default). A local Task Model costs nothing per chat.
+
 Read the [Security](#security) section before leaving `PERMISSION_MODE` at
 its default. Every other valve is described in
 [docs/valves.md](docs/valves.md), generated from the code so it is always

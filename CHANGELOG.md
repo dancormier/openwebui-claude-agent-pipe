@@ -4,6 +4,15 @@ Patches on top of [tfriedel/openwebui-claude-code](https://github.com/tfriedel/o
 commit `5bbc1fc`, in the order they landed. Numbering matches the pipe's own
 comments and the pull requests that introduced them.
 
+## Unreleased
+
+- Chats get titles, tags and follow-up suggestions when no Task Model is set
+  in Open WebUI. The pipe answers those background tasks with one short
+  call on the new `TASK_MODEL` valve (default `claude-haiku-4-5`; empty
+  answers nothing). Before, each task ran as a full agent turn in the
+  chat's own session and the title stayed "New Chat"
+  ([#59](https://github.com/dancormier/openwebui-claude-agent-pipe/issues/59)).
+
 ## v0.3.9 (2026-09-29)
 
 - `ask_user` now streams its questions into the reply when the form fires,

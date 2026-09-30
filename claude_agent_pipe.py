@@ -710,6 +710,28 @@ def _resolve_effort(*candidates: Any) -> Optional[str]:
     return None
 
 
+_TASK_TIMEOUT_SECONDS = 60
+
+_ANSWERED_TASKS = ("title_generation", "tags_generation", "follow_up_generation")
+
+_TASK_SYSTEM_PROMPT = (
+    "You fill in one background field for a chat app. Follow the instructions "
+    "in the message exactly and reply with only the JSON they ask for."
+)
+
+
+def _task_prompt(task: Optional[str], body: Dict[str, Any]) -> str:
+    """The prompt to answer for an Open WebUI background task, or "" to answer
+    nothing. Open WebUI puts its whole task template, chat history included,
+    in the last user message. Other tasks (web-search queries, autocomplete,
+    emoji, ...) get an empty reply: each falls back to its own default, which
+    costs nothing and is safe."""
+    if task not in _ANSWERED_TASKS:
+        return ""
+    for message in reversed(body.get("messages") or []):
+        if message.get("role") == "user":
+            return _message_text(message).strip()
+    return ""
 # ---------------------------------------------------------------------------
 # ask_user: the pure half. Normalizes the agent's question list into the
 # payload Open WebUI's `request:user_input` event expects (its own builtin
@@ -3119,6 +3141,16 @@ class Pipe:
             default="claude-haiku-4-5",
             description="Claude model ID (e.g. claude-haiku-4-5, claude-sonnet-4-6, claude-opus-4-7).",
         )
+        TASK_MODEL: str = Field(
+            default="claude-haiku-4-5",
+            description=(
+                "Model that answers Open WebUI's background tasks (chat "
+                "title, tags, follow-up suggestions) when a chat on this pipe "
+                "has no Task Model set in Admin > Settings > Interface. One "
+                "short call with no tools per task. Empty answers nothing: "
+                "Open WebUI then titles the chat with its first message."
+            ),
+        )
         MODELS: str = Field(
             default="",
             description=(
@@ -3399,6 +3431,7 @@ class Pipe:
         __user__: Optional[Dict[str, Any]] = None,
         __metadata__: Optional[Dict[str, Any]] = None,
         __event_call__: Optional[Callable] = None,
+        __task__: Optional[str] = None,
     ) -> AsyncGenerator[str, None]:
         """Public entrypoint. Scrubs secrets from everything leaving the pipe.
 
@@ -3409,6 +3442,15 @@ class Pipe:
         this wrapper must keep the original parameter list verbatim.
         """
         redactor = _StreamRedactor()
+        # A background task carries the chat's real chat_id, so it must leave
+        # before the in-flight claim and session lookup: as a normal turn it
+        # would stop a running reply and resume the chat's Claude session.
+        if __task__:
+            answer = await self._answer_task(__task__, body)
+            safe = redactor.feed(answer) + redactor.flush()
+            if safe:
+                yield safe
+            return
         workdir_root = _workdir_root(self.valves.WORKDIR_ROOT)
         event_hits: List[str] = []
         emitter = _redacting_emitter(__event_emitter__, event_hits)
@@ -3495,6 +3537,67 @@ class Pipe:
                 ", ".join(f"{k}×{hits.count(k)}" for k in sorted(set(hits))),
             )
 
+    def _apply_auth_env(self) -> None:
+        # Auth selection:
+        #   1. If CLAUDE_CODE_OAUTH_TOKEN valve is set → use subscription.
+        #      Remove any ANTHROPIC_API_KEY from env because per Claude Code's
+        #      precedence order, the API key outranks the OAuth token (docs:
+        #      code.claude.com/docs/en/authentication#authentication-precedence)
+        #      and would otherwise silently win.
+        #   2. Else if ANTHROPIC_API_KEY valve is set → use API.
+        #   3. Else → whatever the backend environment already provides.
+        if self.valves.CLAUDE_CODE_OAUTH_TOKEN:
+            os.environ["CLAUDE_CODE_OAUTH_TOKEN"] = self.valves.CLAUDE_CODE_OAUTH_TOKEN
+            os.environ.pop("ANTHROPIC_API_KEY", None)
+            os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
+        elif self.valves.ANTHROPIC_API_KEY:
+            os.environ["ANTHROPIC_API_KEY"] = self.valves.ANTHROPIC_API_KEY
+
+    async def _answer_task(self, task: str, body: Dict[str, Any]) -> str:
+        """One tool-less Claude call for an Open WebUI background task. Any
+        failure answers "", which Open WebUI treats as "no suggestion"."""
+        prompt = _task_prompt(task, body)
+        model = self.valves.TASK_MODEL.strip()
+        if not prompt or not model:
+            return ""
+        self._apply_auth_env()
+        env = {"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1"}
+        if self.valves.CLAUDE_CONFIG_DIR.strip():
+            env["CLAUDE_CONFIG_DIR"] = str(
+                Path(self.valves.CLAUDE_CONFIG_DIR.strip()).expanduser()
+            )
+        workdir_root = Path(_workdir_root(self.valves.WORKDIR_ROOT))
+        workdir_root.mkdir(parents=True, exist_ok=True)
+        options = ClaudeAgentOptions(
+            cwd=str(workdir_root),
+            model=model,
+            tools=[],
+            max_turns=1,
+            setting_sources=[],
+            system_prompt=_TASK_SYSTEM_PROMPT,
+            env=env,
+            extra_args={
+                "no-session-persistence": None,
+                "strict-mcp-config": None,
+                "disable-slash-commands": None,
+            },
+        )
+
+        async def run() -> str:
+            result = ""
+            async with ClaudeSDKClient(options=options) as client:
+                await client.query(prompt)
+                async for message in client.receive_response():
+                    if isinstance(message, ResultMessage) and not message.is_error:
+                        result = message.result or ""
+            return result
+
+        try:
+            return await asyncio.wait_for(run(), timeout=_TASK_TIMEOUT_SECONDS)
+        except Exception as exc:
+            log.warning("background task %s not answered: %s", task, exc)
+            return ""
+
     async def _record_usage(
         self,
         usage_payload: Dict[str, Any],
@@ -3543,20 +3646,7 @@ class Pipe:
         _no_resume: bool = False,
         inflight: Optional[_InflightTurn] = None,
     ) -> AsyncGenerator[str, None]:
-        # Auth selection:
-        #   1. If CLAUDE_CODE_OAUTH_TOKEN valve is set → use subscription.
-        #      Remove any ANTHROPIC_API_KEY from env because per Claude Code's
-        #      precedence order, the API key outranks the OAuth token (docs:
-        #      code.claude.com/docs/en/authentication#authentication-precedence)
-        #      and would otherwise silently win.
-        #   2. Else if ANTHROPIC_API_KEY valve is set → use API.
-        #   3. Else → whatever the backend environment already provides.
-        if self.valves.CLAUDE_CODE_OAUTH_TOKEN:
-            os.environ["CLAUDE_CODE_OAUTH_TOKEN"] = self.valves.CLAUDE_CODE_OAUTH_TOKEN
-            os.environ.pop("ANTHROPIC_API_KEY", None)
-            os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
-        elif self.valves.ANTHROPIC_API_KEY:
-            os.environ["ANTHROPIC_API_KEY"] = self.valves.ANTHROPIC_API_KEY
+        self._apply_auth_env()
         # claude CLI refuses --dangerously-skip-permissions under root unless
         # told it's inside a sandbox. OpenWebUI's backend runs as UID 0.
         os.environ.setdefault("IS_SANDBOX", "1")
