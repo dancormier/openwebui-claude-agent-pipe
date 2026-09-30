@@ -4,7 +4,7 @@ Patches on top of [tfriedel/openwebui-claude-code](https://github.com/tfriedel/o
 commit `5bbc1fc`, in the order they landed. Numbering matches the pipe's own
 comments and the pull requests that introduced them.
 
-## Unreleased
+## v0.3.10 (2026-09-30)
 
 - Chats get titles, tags and follow-up suggestions when no Task Model is set
   in Open WebUI. The pipe answers those background tasks with one short
