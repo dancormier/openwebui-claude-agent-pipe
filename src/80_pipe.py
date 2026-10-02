@@ -181,6 +181,38 @@
                 "real per-model window). 0 disables the fallback suffix."
             ),
         )
+        COLD_RESUME_GUARD: bool = Field(
+            default=False,
+            description=(
+                "Hold a message sent to a large chat that has sat idle past "
+                "the prompt cache's lifetime, and reply with a warning plus a "
+                "pickup note for a new chat instead of running the agent. "
+                "Resuming such a chat re-processes its whole context as a "
+                "cache write (2x the input price), so one message can cost "
+                "as much as a long conversation. The next reply goes ahead "
+                "regardless (`continue` sends the held message); a message "
+                "starting with '/resume' skips the check. Chats from clients "
+                "that send no chat id (Conduit) are never held."
+            ),
+        )
+        COLD_RESUME_IDLE_MINUTES: int = Field(
+            default=60,
+            ge=1,
+            description=(
+                "Minutes since a chat's last completed turn after which "
+                "COLD_RESUME_GUARD treats it as cold. 60 matches the 1-hour "
+                "prompt cache; lower warns on chats that may still be warm."
+            ),
+        )
+        COLD_RESUME_MIN_CONTEXT_TOKENS: int = Field(
+            default=150_000,
+            ge=0,
+            description=(
+                "Smallest context (tokens, as of the chat's last turn) that "
+                "COLD_RESUME_GUARD holds. Below it, re-processing a cold chat "
+                "costs too little to be worth interrupting for."
+            ),
+        )
         EFFORT: str = Field(
             default="",
             description=(
@@ -555,6 +587,9 @@
         # that still type them; there is only the full agent loop.
         prompt = _strip_mode_prefix(prompt)
         repo_name, prompt = _extract_repo_prefix(prompt)
+        skip_cold_guard, prompt = _extract_resume_prefix(prompt)
+        # Held as typed, `/effort` included, so a `continue` replays it whole.
+        held_prompt = prompt
         effort_override, prompt = _extract_effort_prefix(prompt)
 
         # Keyless callers (no __chat_id__ — generic OpenAI-API clients such
@@ -667,8 +702,49 @@
         # drops. Write them to files under the workdir and reference the
         # paths in the prompt so the agent can Read them.
         attachment_notes = _save_image_attachments(body, workdir)
-        if attachment_notes:
-            prompt = prompt + "\n\n" + "\n".join(attachment_notes)
+        notes = "\n\n" + "\n".join(attachment_notes) if attachment_notes else ""
+
+        if chat_id:
+            meta = _load_session_meta(workdir_root, chat_id)
+            now = time.time()
+            if "cold_warned_at" in meta:
+                _update_session_meta(
+                    workdir_root, chat_id,
+                    {"cold_warned_at": None, "cold_warned_prompt": None},
+                )
+            # Checked whatever the valve says: a warning already shown must
+            # still release its held message if the guard is switched off.
+            if _cold_warning_pending(meta, now):
+                held = meta.get("cold_warned_prompt")
+                # The agent never saw the held message, so a bare "continue"
+                # stands in for it rather than arriving on its own.
+                if isinstance(held, str) and held and _is_cold_ack(prompt):
+                    held_effort, prompt = _extract_effort_prefix(held)
+                    effort_override = effort_override or held_effort
+            elif (
+                self.valves.COLD_RESUME_GUARD
+                and resume_id
+                and not skip_cold_guard
+                and _is_cold_and_large(
+                    meta, now,
+                    self.valves.COLD_RESUME_IDLE_MINUTES,
+                    self.valves.COLD_RESUME_MIN_CONTEXT_TOKENS,
+                )
+            ):
+                _update_session_meta(
+                    workdir_root, chat_id,
+                    {"cold_warned_at": now, "cold_warned_prompt": held_prompt + notes},
+                )
+                yield _cold_resume_warning(
+                    chat_id,
+                    meta["last_context_tokens"],
+                    now - meta["last_turn_at"],
+                    self._resolve_model(body),
+                    _artifact_base_url(self.valves.PUBLIC_BASE_URL),
+                    prompt,
+                )
+                return
+        prompt += notes
 
         if resume_id is None:
             prompt = _render_transcript(body, prompt)
@@ -895,7 +971,7 @@
                                 state.turn_session_id = session_id
                                 if chat_id:
                                     _chat_sessions[chat_id] = session_id
-                                    _save_session_meta(
+                                    _update_session_meta(
                                         workdir_root,
                                         chat_id,
                                         {"session_id": session_id, "cwd": str(cwd)},
@@ -982,17 +1058,26 @@
 
                     if isinstance(message, ResultMessage):
                         ctx = ""
+                        ctx_tokens = 0
                         try:
                             cu = await asyncio.wait_for(
                                 client.get_context_usage(), timeout=5
                             )
                             ctx = _context_from_usage(cu)
+                            ctx_tokens = int(cu.get("totalTokens") or 0)
                         except Exception:
                             log.debug("get_context_usage failed", exc_info=True)
                         if not ctx:
                             ctx = _context_status(
                                 state.last_usage, self.valves.CONTEXT_WINDOW_TOKENS
                             )
+                        if chat_id:
+                            _update_session_meta(workdir_root, chat_id, {
+                                "last_turn_at": int(time.time()),
+                                "last_context_tokens": (
+                                    ctx_tokens or _context_tokens(state.last_usage)
+                                ),
+                            })
                         await emit_status(
                             _done_line(
                                 message.duration_ms, state.tool_count, ctx,
@@ -1054,8 +1139,8 @@
                 )
                 if chat_id:
                     _chat_sessions.pop(chat_id, None)
-                    _save_session_meta(
-                        workdir_root, chat_id, {"cwd": str(cwd)}
+                    _update_session_meta(
+                        workdir_root, chat_id, {"session_id": None, "cwd": str(cwd)}
                     )
                 await emit_status("Session expired — replaying history…")
                 async for chunk in self._pipe_stream(

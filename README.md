@@ -62,6 +62,10 @@ repo is where the idea came from.
   the reply stream and status events before they reach the chat database.
 - **Effort, budget, fallback** — per-chat Reasoning Effort or per-turn `/effort <level>`, a task token
   budget the model paces itself against, and a fallback model.
+- **Cold-resume guard** (opt-in, `COLD_RESUME_GUARD`) — a message to a large
+  chat idle past the prompt cache gets a cost warning and a pickup note for a
+  new chat instead of a full-price context rebuild; `continue` or `/resume`
+  goes ahead.
 
 ## Requirements
 

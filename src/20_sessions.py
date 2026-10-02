@@ -108,6 +108,20 @@ def _save_session_meta(
         logging.getLogger(__name__).warning("could not persist session meta for %s", chat_id, exc_info=True)
 
 
+def _update_session_meta(
+    workdir_root: str, chat_id: str, updates: Dict[str, Any]
+) -> None:
+    """Read-modify-write so writers of different fields never drop each
+    other's keys. A None value removes the key."""
+    meta = _load_session_meta(workdir_root, chat_id)
+    for key, value in updates.items():
+        if value is None:
+            meta.pop(key, None)
+        else:
+            meta[key] = value
+    _save_session_meta(workdir_root, chat_id, meta)
+
+
 def _fp_store_path(workdir_root: str) -> Path:
     return Path(workdir_root) / _FP_STORE_FILE
 

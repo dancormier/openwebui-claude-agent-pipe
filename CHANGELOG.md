@@ -4,6 +4,17 @@ Patches on top of [tfriedel/openwebui-claude-code](https://github.com/tfriedel/o
 commit `5bbc1fc`, in the order they landed. Numbering matches the pipe's own
 comments and the pull requests that introduced them.
 
+## Unreleased
+
+- New opt-in `COLD_RESUME_GUARD` valve (off by default). When a chat has
+  been idle longer than `COLD_RESUME_IDLE_MINUTES` (60) and its context was
+  at least `COLD_RESUME_MIN_CONTEXT_TOKENS` (150k), a new message gets a
+  short warning instead of an agent run: resuming re-processes the whole
+  context as a cache write at twice the input price. The warning includes a
+  pickup note to paste into a new chat. The next reply goes ahead (`continue`
+  sends the held message), and `/resume` at the start of a message skips the
+  check. Only chats with a chat id are held.
+
 ## v0.3.10 (2026-09-30)
 
 - Chats get titles, tags and follow-up suggestions when no Task Model is set
