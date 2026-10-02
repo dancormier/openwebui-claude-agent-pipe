@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
 """Tests for redact_stdin.py — the async worker's redaction boundary.
 
-Run: python3 hub/pipe/test_redact_stdin.py
+Run: python3 test_redact_stdin.py
 
 The worker is a separate process from the pipe, so it reaches the redactor by
 slicing the pipe's head. These tests drive the helper exactly as the worker
 does: subprocess, text on stdin, redacted text on stdout.
 """
 
+import base64
+import os
 import pathlib
 import subprocess
 import sys
 import tempfile
+
+from _loader import check_eq as check, fails, report
 
 HELPER = pathlib.Path(__file__).with_name("redact_stdin.py")
 
@@ -19,19 +23,12 @@ HELPER = pathlib.Path(__file__).with_name("redact_stdin.py")
 ANTHROPIC = "sk-ant-oat01-" + "A1b2C3d4E5" * 9
 GITHUB = "ghp_" + "z9y8x7w6v5" * 3
 
-fails = []
-
 
 def run(stdin_text, *args):
     return subprocess.run(
         [sys.executable, str(HELPER), *args],
         input=stdin_text, capture_output=True, text=True,
     )
-
-
-def check(name, got, want):
-    if got != want:
-        fails.append(f"{name}\n    got:  {got!r}\n    want: {want!r}")
 
 
 # Secrets are scrubbed, exit 0, labels reported on stderr.
@@ -79,9 +76,6 @@ check("missing pipe writes no stdout", r.stdout, "")
 # Pattern matching cannot know a uuid token or an ntfy topic; the worker names
 # them from secrets.tpl and the values come from the environment it sources in
 # a subshell. Synthetic values only.
-import base64
-import os
-
 UUID = "3f2a9c1e-5b7d-4e8f-9a0b-1c2d3e4f5a6b"
 TOPIC = "topic with/slash+plus"          # URL-encoding and base64 both differ from the text
 PASSWORD = "p@ss>w0rd?~~!!"              # urlsafe and standard base64 differ
@@ -167,9 +161,4 @@ r = run_env(f"secret {UUID}", "--known-from-tpl", "/nonexistent/secrets.tpl")
 check("missing tpl exits 1", r.returncode, 1)
 check("missing tpl writes no stdout", r.stdout, "")
 
-if fails:
-    print(f"FAIL ({len(fails)})")
-    for f in fails:
-        print("  " + f)
-    sys.exit(1)
-print("ok — redact_stdin tests passed")
+report("redact_stdin tests passed")

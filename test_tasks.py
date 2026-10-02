@@ -4,38 +4,9 @@
 Run: python3 test_tasks.py [<path-to-pipe.py>]
 """
 
-import pathlib
-import sys
-import types
+from _loader import check, load_head, report
 
-PIPE = pathlib.Path(
-    sys.argv[1] if len(sys.argv) > 1
-    else pathlib.Path(__file__).with_name("claude_agent_pipe.py")
-)
-SPLIT = "from claude_agent_sdk import ("
-
-if "pydantic" not in sys.modules:
-    _stub = types.ModuleType("pydantic")
-    _stub.BaseModel = type("BaseModel", (), {})
-    _stub.Field = lambda *a, **k: None
-    sys.modules["pydantic"] = _stub
-
-src = PIPE.read_text(encoding="utf-8")
-head = src.split(SPLIT, 1)[0]
-mod = types.ModuleType("pipe_head")
-mod.__dict__["__name__"] = "pipe_head"
-exec(compile(head, str(PIPE), "exec"), mod.__dict__)
-
-fails = []
-
-
-def check(name, cond, detail=""):
-    if cond:
-        print(f"  PASS  {name}")
-    else:
-        print(f"  FAIL  {name}  {detail}")
-        fails.append(name)
-
+mod = load_head()
 
 TEMPLATE = "### Task:\nGenerate a title...\n<chat_history>\nUSER: hi\n</chat_history>"
 body = {"messages": [{"role": "user", "content": TEMPLATE}]}
@@ -67,8 +38,4 @@ check("no messages", mod._task_prompt("title_generation", {}) == "")
 check("assistant only",
       mod._task_prompt("title_generation", {"messages": [{"role": "assistant", "content": "x"}]}) == "")
 
-print()
-if fails:
-    print(f"{len(fails)} FAILED: {', '.join(fails)}")
-    sys.exit(1)
-print("all passed")
+report("background task tests passed")

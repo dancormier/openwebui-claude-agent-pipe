@@ -1,35 +1,16 @@
 #!/usr/bin/env python3
 """Tests for the pipe's context-usage status helpers.
 
-Run: python3 hub/pipe/test_context_status.py
-     python3 hub/pipe/test_context_status.py <path-to-pipe.py>
+Run: python3 test_context_status.py [<path-to-pipe.py>]
 
-Same standalone pattern as test_sessions.py: slice the module at the SDK
-import, stub pydantic, exec the head. Runs against the deployed copy too.
+Runs against the deployed copy too.
 """
 
-import pathlib
-import sys
 import time
-import types
 
-PIPE = pathlib.Path(
-    sys.argv[1] if len(sys.argv) > 1
-    else pathlib.Path(__file__).with_name("claude_agent_pipe.py")
-)
-SPLIT = "from claude_agent_sdk import ("
+from _loader import check_eq as check, load_head, report
 
-if "pydantic" not in sys.modules:
-    _stub = types.ModuleType("pydantic")
-    _stub.BaseModel = type("BaseModel", (), {})
-    _stub.Field = lambda *a, **k: None
-    sys.modules["pydantic"] = _stub
-
-src = PIPE.read_text(encoding="utf-8")
-head = src.split(SPLIT, 1)[0]
-mod = types.ModuleType("pipe_head")
-mod.__dict__["__name__"] = "pipe_head"
-exec(compile(head, str(PIPE), "exec"), mod.__dict__)
+mod = load_head()
 
 fmt = mod._fmt_tokens
 ctx_tokens = mod._context_tokens
@@ -38,14 +19,6 @@ owui_usage = mod._owui_usage
 fmt_dur = mod._fmt_duration
 effort_prefix = mod._extract_effort_prefix
 resolve_effort = mod._resolve_effort
-
-fails = []
-
-
-def check(name, got, want):
-    if got != want:
-        fails.append(f"{name}: got {got!r}, want {want!r}")
-
 
 check("fmt small", fmt(999), "999")
 check("fmt k", fmt(74_400), "74k")
@@ -214,9 +187,4 @@ check("resolve skips openai-only level", resolve_effort(None, "minimal", "medium
 check("resolve non-string chat value", resolve_effort(None, 3, ""), None)
 check("resolve nothing set", resolve_effort(None, None, ""), None)
 
-if fails:
-    print("FAIL")
-    for f in fails:
-        print(" -", f)
-    sys.exit(1)
-print(f"ok — {PIPE}")
+report(f"context status tests passed ({mod.__file__})")

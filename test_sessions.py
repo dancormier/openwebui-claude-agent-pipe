@@ -1,48 +1,21 @@
 #!/usr/bin/env python3
 """Tests for the pipe's session-persistence helpers.
 
-Run: python3 hub/pipe/test_sessions.py
-     python3 hub/pipe/test_sessions.py <path-to-pipe.py>
+Run: python3 test_sessions.py [<path-to-pipe.py>]
 
-Same standalone pattern as test_redaction.py: slice the module at the SDK
-import, stub pydantic, exec the head. Runs against the deployed copy too.
+Runs against the deployed copy too.
 """
 
-import json
 import pathlib
-import sys
 import tempfile
 import time
-import types
 
-PIPE = pathlib.Path(
-    sys.argv[1] if len(sys.argv) > 1
-    else pathlib.Path(__file__).with_name("claude_agent_pipe.py")
-)
-SPLIT = "from claude_agent_sdk import ("
+from _loader import check_eq as check, fails, load_head, report
 
-if "pydantic" not in sys.modules:
-    _stub = types.ModuleType("pydantic")
-    _stub.BaseModel = type("BaseModel", (), {})
-    _stub.Field = lambda *a, **k: None
-    sys.modules["pydantic"] = _stub
-
-src = PIPE.read_text(encoding="utf-8")
-head = src.split(SPLIT, 1)[0]
-mod = types.ModuleType("pipe_head")
-mod.__dict__["__name__"] = "pipe_head"
-exec(compile(head, str(PIPE), "exec"), mod.__dict__)
+mod = load_head()
 
 fp = mod._history_fingerprint
 strip_latest = mod._strip_latest_user
-
-fails = []
-
-
-def check(name, got, want):
-    if got != want:
-        fails.append(f"{name}\n    got:  {got!r}\n    want: {want!r}")
-
 
 U1 = {"role": "user", "content": "hello"}
 A1 = {"role": "assistant", "content": "hi there"}
@@ -230,9 +203,4 @@ check("unknown ~user in the path yields nothing instead of raising",
 check("NUL byte in the path yields nothing instead of raising",
       _gateway_contract(str(_repo), str(_workdir_root), "/tmp/\x00bad.md"), "")
 
-if fails:
-    print(f"FAIL ({len(fails)})")
-    for f in fails:
-        print("  " + f)
-    sys.exit(1)
-print("ok — session tests passed")
+report("session tests passed")

@@ -1,41 +1,16 @@
 #!/usr/bin/env python3
 """Tests for the pipe's output-boundary secret redaction.
 
-Run: python3 hub/pipe/test_redaction.py
-     python3 hub/pipe/test_redaction.py <path-to-pipe.py>
+Run: python3 test_redaction.py [<path-to-pipe.py>]
 
-Imports the redaction helpers without importing the whole pipe module, which
-needs claude_agent_sdk / pydantic that aren't installed outside Open WebUI's
-backend. The module is sliced at the SDK import, pydantic is stubbed, and the
-result is exec'd standalone — so this also runs against the *deployed* copy
-pulled out of webui.db on a host with no Python dependencies installed, which
-is the copy that actually matters.
+Uses only the sliced head of the module, so this also runs against the
+*deployed* copy pulled out of webui.db on a host with no Python dependencies
+installed, which is the copy that actually matters.
 """
 
-import pathlib
-import sys
-import types
+from _loader import check_eq as check, fails, load_head, report
 
-PIPE = pathlib.Path(
-    sys.argv[1] if len(sys.argv) > 1
-    else pathlib.Path(__file__).with_name("claude_agent_pipe.py")
-)
-SPLIT = "from claude_agent_sdk import ("
-
-# The sliced head still imports pydantic for the Valves model. Stub it: the
-# redaction helpers under test don't touch it, and requiring the real package
-# would keep this suite from running where it's most useful.
-if "pydantic" not in sys.modules:
-    _stub = types.ModuleType("pydantic")
-    _stub.BaseModel = type("BaseModel", (), {})
-    _stub.Field = lambda *a, **k: None
-    sys.modules["pydantic"] = _stub
-
-src = PIPE.read_text(encoding="utf-8")
-head = src.split(SPLIT, 1)[0]
-mod = types.ModuleType("pipe_head")
-mod.__dict__["__name__"] = "pipe_head"
-exec(compile(head, str(PIPE), "exec"), mod.__dict__)
+mod = load_head()
 
 _redact_secrets = mod._redact_secrets
 _redact_event = mod._redact_event
@@ -53,13 +28,6 @@ GOCSPX = "GOCSPX-" + "Ab1Cd2Ef3G" * 3
 GREFRESH = "1//0g" + "FakeRefr01" * 5
 SK_PROJ = "sk-proj-" + "Ab1_Cd2-Ef" * 5
 OPS = "ops_eyJ" + "FakeSvcTok" * 6
-
-fails = []
-
-
-def check(name, got, want):
-    if got != want:
-        fails.append(f"{name}\n    got:  {got!r}\n    want: {want!r}")
 
 
 def contains_none_of(name, text, needles):
@@ -195,10 +163,4 @@ ev = _redact_event({"a": [{"b": GITHUB}]}, hits)
 contains_none_of("nested event scrubbed", str(ev), [GITHUB])
 check("nested event labelled", hits, ["github-token"])
 
-# ── report ─────────────────────────────────────────────────────────────────
-if fails:
-    print(f"FAIL ({len(fails)})")
-    for f in fails:
-        print("  " + f)
-    sys.exit(1)
-print("ok — redaction tests passed")
+report("redaction tests passed")

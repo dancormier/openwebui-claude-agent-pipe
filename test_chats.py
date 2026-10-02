@@ -3,43 +3,15 @@
 
 Run: python3 test_chats.py [<path-to-pipe.py>]
 
-Same standalone pattern as test_turn.py: slice the module at the SDK import,
-stub pydantic, exec the head. The rows here mirror the `chat` table's JSON
-column in both shapes Open WebUI has used (history.messages map, flat list).
+The rows here mirror the `chat` table's JSON column in both shapes Open WebUI
+has used (history.messages map, flat list).
 """
 
 import json
-import pathlib
-import sys
-import types
 
-PIPE = pathlib.Path(
-    sys.argv[1] if len(sys.argv) > 1
-    else pathlib.Path(__file__).with_name("claude_agent_pipe.py")
-)
-SPLIT = "from claude_agent_sdk import ("
+from _loader import check, load_head, report
 
-if "pydantic" not in sys.modules:
-    _stub = types.ModuleType("pydantic")
-    _stub.BaseModel = type("BaseModel", (), {})
-    _stub.Field = lambda *a, **k: None
-    sys.modules["pydantic"] = _stub
-
-src = PIPE.read_text(encoding="utf-8")
-head = src.split(SPLIT, 1)[0]
-mod = types.ModuleType("pipe_head")
-mod.__dict__["__name__"] = "pipe_head"
-exec(compile(head, str(PIPE), "exec"), mod.__dict__)
-
-fails = []
-
-
-def check(name, cond, detail=""):
-    if cond:
-        print(f"  PASS  {name}")
-    else:
-        print(f"  FAIL  {name}  {detail}")
-        fails.append(name)
+mod = load_head()
 
 
 def history_blob(*turns):
@@ -105,7 +77,4 @@ check("sqlite URL is sqlite", mod._db_is_sqlite("sqlite:///data/webui.db"))
 check("postgres URL is not", not mod._db_is_sqlite("postgresql://u:p@db/owui"))
 check("postgres+psycopg URL is not", not mod._db_is_sqlite("postgres+psycopg://u:p@db/owui"))
 
-if fails:
-    print(f"\nFAILED: {len(fails)} — " + ", ".join(fails))
-    sys.exit(1)
-print("ok — chat search tests passed")
+report("chat search tests passed")
