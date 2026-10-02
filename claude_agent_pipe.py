@@ -795,7 +795,10 @@ def _is_cold_and_large(
 
 
 def _cold_resume_cost(model: str, tokens: int) -> Optional[float]:
-    price = _INPUT_USD_PER_MTOK.get((model or "").strip().lower())
+    # Model ids arrive as `claude-opus-5-5[1m]` or with a date suffix.
+    key = re.sub(r"\[.*?\]$", "", (model or "").strip().lower())
+    key = re.sub(r"-\d{8}$", "", key)
+    price = _INPUT_USD_PER_MTOK.get(key)
     if price is None:
         return None
     return tokens * price * 2 / 1e6

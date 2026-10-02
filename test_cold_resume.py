@@ -108,6 +108,8 @@ check_eq("resume needs a word boundary", mod._extract_resume_prefix("/resumed x"
 check_eq("resume only at the start", mod._extract_resume_prefix("hi /resume"), (False, "hi /resume"))
 check_eq("cost opus-5-5 at 265k", round(mod._cold_resume_cost("claude-opus-5-5", 265_000), 2), 2.12)
 check_eq("cost unknown model", mod._cold_resume_cost("claude-mystery-9", 265_000), None)
+check_eq("cost 1m-suffixed id", round(mod._cold_resume_cost("claude-opus-5-5[1m]", 265_000), 2), 2.12)
+check_eq("cost dated haiku id", round(mod._cold_resume_cost("claude-haiku-4-5-20251001", 1_000_000), 2), 2.0)
 check("fence outgrows backticks inside", mod._code_fence("a ```b``` c").startswith("````\n"), mod._code_fence("a ```b``` c"))
 check("pending within ttl", mod._cold_warning_pending({"cold_warned_at": 1000}, 1000 + 60))
 check("not pending past ttl", not mod._cold_warning_pending({"cold_warned_at": 1000}, 1000 + 31 * 60))
