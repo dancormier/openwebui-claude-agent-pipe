@@ -4,7 +4,7 @@ Patches on top of [tfriedel/openwebui-claude-code](https://github.com/tfriedel/o
 commit `5bbc1fc`, in the order they landed. Numbering matches the pipe's own
 comments and the pull requests that introduced them.
 
-## Unreleased
+## v0.3.11 (2026-10-02)
 
 - New opt-in `COLD_RESUME_GUARD` valve (off by default). When a chat has
   been idle longer than `COLD_RESUME_IDLE_MINUTES` (60) and its context was
