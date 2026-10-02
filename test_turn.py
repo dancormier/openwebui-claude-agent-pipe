@@ -3,42 +3,13 @@
 
 Run: python3 test_turn.py [<path-to-pipe.py>]
 
-Same standalone pattern as test_sessions.py: slice the module at the SDK
-import, stub pydantic, exec the head. The handlers take plain values and
-return (chunks, status), so no SDK types are needed.
+The handlers take plain values and return (chunks, status), so no SDK types
+are needed.
 """
 
-import pathlib
-import sys
-import types
+from _loader import check, load_head, report
 
-PIPE = pathlib.Path(
-    sys.argv[1] if len(sys.argv) > 1
-    else pathlib.Path(__file__).with_name("claude_agent_pipe.py")
-)
-SPLIT = "from claude_agent_sdk import ("
-
-if "pydantic" not in sys.modules:
-    _stub = types.ModuleType("pydantic")
-    _stub.BaseModel = type("BaseModel", (), {})
-    _stub.Field = lambda *a, **k: None
-    sys.modules["pydantic"] = _stub
-
-src = PIPE.read_text(encoding="utf-8")
-head = src.split(SPLIT, 1)[0]
-mod = types.ModuleType("pipe_head")
-mod.__dict__["__name__"] = "pipe_head"
-exec(compile(head, str(PIPE), "exec"), mod.__dict__)
-
-fails = []
-
-
-def check(name, cond, detail=""):
-    if cond:
-        print(f"  PASS  {name}")
-    else:
-        print(f"  FAIL  {name}  {detail}")
-        fails.append(name)
+mod = load_head()
 
 
 def ev(etype, **kw):
@@ -126,6 +97,19 @@ check("bash not inline still yields nothing", chunks == [], chunks)
 chunks, status = mod._on_tool_use(mod._ASK_USER_TOOL, {"questions": "junk"}, "a3", ask_st, True, 202.0)
 check("ask_user malformed: no question chunk, no raise", all("<details>" in c for c in chunks) and status.startswith("🔧 "), chunks)
 
+# ---- ask_user: status line and quiet wait ----
+check("preview is the first question", mod._ask_user_preview(ASK_Q) == "Which files?")
+check("preview falls back to header", mod._ask_user_preview({"questions": [{"header": "Scope", "options": []}]}) == "Scope")
+check("preview empty on junk", mod._ask_user_preview({"questions": "x"}) == "")
+check("tool preview uses the custom hook", mod._tool_preview(mod._ASK_USER_TOOL, ASK_Q) == "Which files?")
+form_st = mod._TurnState()
+_, status = mod._on_tool_use(mod._ASK_USER_TOOL, ASK_Q, "t1", form_st, False, 0.0)
+check("status line while waiting", status == f"🔧 {mod._ASK_USER_TOOL}: Which files?", status)
+check("form is the only active tool → quiet wait", mod._only_ask_user(form_st.active_tools))
+mod._on_tool_use("Bash", {"command": "ls"}, "t2", form_st, False, 1.0)
+check("form plus another tool → normal heartbeat", not mod._only_ask_user(form_st.active_tools))
+check("no active tools → not a quiet wait", not mod._only_ask_user({}))
+
 # ---- heartbeat label ----
 label, elapsed = mod._heartbeat_label(st.active_tools, 110.0)
 check("heartbeat: multiple tools names count and oldest", label == "3 tools · longest Bash: ls -la" and elapsed == 10, label)
@@ -211,7 +195,4 @@ check("Agent result closes with summary", status == "✅ researcher: Look up X �
 check("done line counts subagents", mod._done_line(5000, 3, "", 2) == "Done · 5s · 3 tools · 2 subagents", mod._done_line(5000, 3, "", 2))
 check("done line: one subagent singular", mod._done_line(None, 0, "", 1) == "Done · 1 subagent")
 
-if fails:
-    print(f"\nFAILED: {len(fails)} — " + ", ".join(fails))
-    sys.exit(1)
-print("ok — turn handler tests passed")
+report("turn handler tests passed")

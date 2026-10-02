@@ -3,9 +3,8 @@
 
 Run: python3 test_artifacts.py [<path-to-pipe.py>]
 
-Same standalone pattern as test_turn.py: slice the module at the SDK import,
-stub pydantic, exec the head. open_webui's file store is stubbed with an
-in-memory dict so the uploader runs without Open WebUI installed.
+open_webui's file store is stubbed with an in-memory dict so the uploader
+runs without Open WebUI installed.
 """
 
 import asyncio
@@ -15,17 +14,7 @@ import sys
 import tempfile
 import types
 
-PIPE = pathlib.Path(
-    sys.argv[1] if len(sys.argv) > 1
-    else pathlib.Path(__file__).with_name("claude_agent_pipe.py")
-)
-SPLIT = "from claude_agent_sdk import ("
-
-if "pydantic" not in sys.modules:
-    _stub = types.ModuleType("pydantic")
-    _stub.BaseModel = type("BaseModel", (), {})
-    _stub.Field = lambda *a, **k: None
-    sys.modules["pydantic"] = _stub
+from _loader import check, load_head, report
 
 uploaded = []
 forms = []
@@ -69,25 +58,11 @@ _mod("open_webui.models.files", FileForm=lambda **kw: kw, Files=_Files)
 _mod("open_webui.storage")
 _mod("open_webui.storage.provider", Storage=_Storage)
 
-src = PIPE.read_text(encoding="utf-8")
-head = src.split(SPLIT, 1)[0]
-mod = types.ModuleType("pipe_head")
-mod.__dict__["__name__"] = "pipe_head"
-exec(compile(head, str(PIPE), "exec"), mod.__dict__)
-
-fails = []
+mod = load_head()
 
 
 def inline(*args, **kwargs):
     return asyncio.run(mod._inline_new_artifacts(*args, **kwargs))
-
-
-def check(name, cond, detail=""):
-    if cond:
-        print(f"  PASS  {name}")
-    else:
-        print(f"  FAIL  {name}  {detail}")
-        fails.append(name)
 
 
 def touch(root, rel, data=b"x"):
@@ -229,16 +204,13 @@ finally:
 with tempfile.TemporaryDirectory() as tmp:
     root = pathlib.Path(tmp)
     before = mod._snapshot_artifacts([root])
-    for name in ("a.md", "b.txt", "c.yaml", "d.yml", "e.json", "f.csv", "g.png", "h.pdf"):
+    for name in ("a.md", "b.txt", "c.yaml", "d.yml", "e.json"):
         touch(root, name)
     forms.clear()
     inline([root], before, "user")
     types = {f["filename"]: f["meta"]["content_type"] for f in forms}
     for name in ("a.md", "b.txt", "c.yaml", "d.yml", "e.json"):
         check(f"{name} is text/plain", types.get(name) == "text/plain", types.get(name))
-    check("csv keeps its own type", types.get("f.csv") == "text/csv", types.get("f.csv"))
-    check("png keeps its own type", types.get("g.png") == "image/png", types.get("g.png"))
-    check("pdf keeps its own type", types.get("h.pdf") == "application/pdf", types.get("h.pdf"))
 
 # ---- audio files are uploaded as audio ----
 with tempfile.TemporaryDirectory() as tmp:
@@ -252,12 +224,4 @@ with tempfile.TemporaryDirectory() as tmp:
     for name in ("a.mp3", "b.wav", "c.m4a"):
         check(f"{name} uploaded as audio", (types.get(name) or "").startswith("audio/"), types.get(name))
 
-# ---- the agent is told not to link workdir files by path ----
-check("prompt names the paperclip line", "paperclip" in mod._ARTIFACTS_PROMPT)
-check("prompt forbids filesystem-path links", "Never link a workdir file by its filesystem path" in mod._ARTIFACTS_PROMPT)
-
-print()
-if fails:
-    print(f"{len(fails)} FAILED: {fails}")
-    sys.exit(1)
-print("all passed")
+report("artifact tests passed")

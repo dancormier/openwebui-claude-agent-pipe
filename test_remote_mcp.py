@@ -3,45 +3,20 @@
 
 Run: python3 test_remote_mcp.py [<path-to-pipe.py>]
 
-Same standalone pattern as test_askuser.py: slice the module at the SDK
-import, stub pydantic, exec the head. The SDK's own handling of an http
-server is not under test here; what is tested is that the valve text turns
-into exactly the configs the SDK is handed, and that nothing else does.
+The SDK's own handling of an http server is not under test here; what is
+tested is that the valve text turns into exactly the configs the SDK is
+handed, and that nothing else does.
 """
 
 import json
+import os
 import pathlib
-import sys
-import types
+import stat
+import tempfile
 
-PIPE = pathlib.Path(
-    sys.argv[1] if len(sys.argv) > 1
-    else pathlib.Path(__file__).with_name("claude_agent_pipe.py")
-)
-SPLIT = "from claude_agent_sdk import ("
+from _loader import check, load_head, report
 
-if "pydantic" not in sys.modules:
-    _stub = types.ModuleType("pydantic")
-    _stub.BaseModel = type("BaseModel", (), {})
-    _stub.Field = lambda *a, **k: None
-    sys.modules["pydantic"] = _stub
-
-src = PIPE.read_text(encoding="utf-8")
-head = src.split(SPLIT, 1)[0]
-mod = types.ModuleType("pipe_head")
-mod.__dict__["__name__"] = "pipe_head"
-exec(compile(head, str(PIPE), "exec"), mod.__dict__)
-
-fails = []
-
-
-def check(name, cond, detail=""):
-    if cond:
-        print(f"  PASS  {name}")
-    else:
-        print(f"  FAIL  {name}  {detail}")
-        fails.append(name)
-
+mod = load_head()
 
 parse = mod._parse_remote_mcp_servers
 
@@ -95,7 +70,6 @@ clean, hits = mod._redact_secrets("short lin_api_abc stays")
 check("short lookalike untouched", clean == "short lin_api_abc stays", repr(clean))
 
 print("remote servers travel by file, never argv")
-import os, stat, tempfile
 with tempfile.TemporaryDirectory() as td:
     target = pathlib.Path(td) / ".mcp"
     servers, _, _ = mod._parse_remote_mcp_servers(json.dumps({
@@ -115,8 +89,4 @@ with tempfile.TemporaryDirectory() as td:
     f3 = mod._write_remote_mcp_config(servers, target)
     check("day-old leftover swept on the next write", not f1.exists() and f2.exists() and f3.exists())
 
-print()
-if fails:
-    print(f"{len(fails)} failed: {fails}")
-    sys.exit(1)
-print("all passed")
+report("remote MCP tests passed")

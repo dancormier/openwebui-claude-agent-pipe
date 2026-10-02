@@ -2,44 +2,14 @@
 """Tests for the per-chat in-flight turn guard (src/36_inflight.py).
 
 Run: python3 test_inflight.py [<path-to-pipe.py>]
-
-Same standalone pattern as test_turn.py: slice the module at the SDK import,
-stub pydantic, exec the head.
 """
 
 import asyncio
-import pathlib
-import sys
-import types
 
-PIPE = pathlib.Path(
-    sys.argv[1] if len(sys.argv) > 1
-    else pathlib.Path(__file__).with_name("claude_agent_pipe.py")
-)
-SPLIT = "from claude_agent_sdk import ("
+from _loader import check_eq as check, load_head, report
 
-if "pydantic" not in sys.modules:
-    _stub = types.ModuleType("pydantic")
-    _stub.BaseModel = type("BaseModel", (), {})
-    _stub.Field = lambda *a, **k: None
-    sys.modules["pydantic"] = _stub
-
-src = PIPE.read_text(encoding="utf-8")
-head = src.split(SPLIT, 1)[0]
-mod = types.ModuleType("pipe_head")
-mod.__dict__["__name__"] = "pipe_head"
-exec(compile(head, str(PIPE), "exec"), mod.__dict__)
-
+mod = load_head()
 claim, release, registry = mod._claim_chat, mod._release_chat, mod._inflight
-
-failures = 0
-
-
-def check(name, got, want):
-    global failures
-    ok = got == want
-    failures += 0 if ok else 1
-    print(f"  {'PASS' if ok else 'FAIL'}  {name}" + ("" if ok else f"\n        got:  {got!r}\n        want: {want!r}"))
 
 
 # ---- first turn in a chat claims without stopping anything ----
@@ -160,6 +130,4 @@ async def regenerate_is_not_an_answer():
 check("typed answer: the turn's own prompt re-sent (regenerate) is refused, a different text is delivered",
       asyncio.run(regenerate_is_not_an_answer()), ("plan the trip", False, True, True))
 
-if failures:
-    sys.exit(f"{failures} failure(s)")
-print("ok — in-flight guard tests passed")
+report("in-flight guard tests passed")
