@@ -101,11 +101,25 @@ def _save_session_meta(
     path = _session_meta_path(workdir_root, chat_id)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".json.tmp")
+        tmp = path.with_suffix(f".json.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
         tmp.write_text(json.dumps(meta), "utf-8")
         tmp.replace(path)
     except OSError:
         logging.getLogger(__name__).warning("could not persist session meta for %s", chat_id, exc_info=True)
+
+
+def _update_session_meta(
+    workdir_root: str, chat_id: str, updates: Dict[str, Any]
+) -> None:
+    """Read-modify-write so writers of different fields never drop each
+    other's keys. A None value removes the key."""
+    meta = _load_session_meta(workdir_root, chat_id)
+    for key, value in updates.items():
+        if value is None:
+            meta.pop(key, None)
+        else:
+            meta[key] = value
+    _save_session_meta(workdir_root, chat_id, meta)
 
 
 def _fp_store_path(workdir_root: str) -> Path:
@@ -133,7 +147,7 @@ def _save_fp_store(workdir_root: str, store: Dict[str, Dict[str, Any]]) -> None:
     path = _fp_store_path(workdir_root)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".json.tmp")
+        tmp = path.with_suffix(f".json.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
         tmp.write_text(json.dumps(store), "utf-8")
         tmp.replace(path)
     except OSError:
