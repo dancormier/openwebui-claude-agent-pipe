@@ -31,6 +31,7 @@ USER = {"id": "u1"}
 
 class FakeClient:
     instances = []
+    fail_before_init = False
 
     def __init__(self, options=None):
         self.options = options.__dict__
@@ -54,6 +55,8 @@ class FakeClient:
 
     async def receive_response(self):
         sid = self.options.get("resume") or "sess-new"
+        if FakeClient.fail_before_init:
+            raise RuntimeError("resume failed")
         yield mod.SystemMessage(subtype="init", data={"session_id": sid})
         yield mod.ResultMessage(subtype="success", duration_ms=100, is_error=False, result="", num_turns=1)
 
@@ -209,6 +212,36 @@ held = meta("img").get("cold_warned_prompt", "")
 check("image: held prompt carries the attachment note", client is None and held.startswith("what is this\n\n") and "attachments" in held, held)
 _, client = turn("img", "ok")
 check("image: ack sends text and attachment note", client is not None and client.queries == [held], client and client.queries)
+
+# ---- /resume is left alone when the guard is off ----
+saved = pipe.valves.COLD_RESUME_GUARD
+pipe.valves.COLD_RESUME_GUARD = False
+seed("off-resume", idle_seconds=10)
+_, client = turn("off-resume", "/resume what did we decide?")
+check("disabled: /resume reaches the agent as typed",
+      client is not None and client.queries == ["/resume what did we decide?"], client and client.queries)
+pipe.valves.COLD_RESUME_GUARD = True
+
+# ---- bare /resume with the guard on asks for a message ----
+seed("bare")
+out, client = turn("bare", "/resume")
+check("bare /resume: agent not run", client is None, out)
+check("bare /resume: says what to add", "/resume" in out, out)
+
+# ---- a failed resume keeps the warning so the retry still swaps in the held message ----
+seed("retry")
+turn("retry", "the held question")
+FakeClient.fail_before_init = True
+try:
+    asyncio.run(collect(pipe._pipe_stream({"messages": [{"role": "user", "content": "continue"}]}, "retry", None, None, USER)))
+except Exception:
+    pass
+FakeClient.fail_before_init = False
+check("failed resume: warning still pending", "cold_warned_prompt" in meta("retry"), meta("retry"))
+_, client = turn("retry", "continue")
+check("after a failed resume, continue still sends the held message",
+      client is not None and client.queries[-1].endswith("\n\nthe held question"), client and client.queries)
+pipe.valves.COLD_RESUME_GUARD = saved
 
 # ---- a warning shown before the guard was switched off still releases ----
 seed("switch")

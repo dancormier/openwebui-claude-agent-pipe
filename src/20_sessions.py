@@ -101,7 +101,7 @@ def _save_session_meta(
     path = _session_meta_path(workdir_root, chat_id)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".json.tmp")
+        tmp = path.with_suffix(f".json.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
         tmp.write_text(json.dumps(meta), "utf-8")
         tmp.replace(path)
     except OSError:
@@ -147,7 +147,7 @@ def _save_fp_store(workdir_root: str, store: Dict[str, Dict[str, Any]]) -> None:
     path = _fp_store_path(workdir_root)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".json.tmp")
+        tmp = path.with_suffix(f".json.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
         tmp.write_text(json.dumps(store), "utf-8")
         tmp.replace(path)
     except OSError:

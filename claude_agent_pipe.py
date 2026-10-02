@@ -338,7 +338,7 @@ def _save_session_meta(
     path = _session_meta_path(workdir_root, chat_id)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".json.tmp")
+        tmp = path.with_suffix(f".json.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
         tmp.write_text(json.dumps(meta), "utf-8")
         tmp.replace(path)
     except OSError:
@@ -384,7 +384,7 @@ def _save_fp_store(workdir_root: str, store: Dict[str, Dict[str, Any]]) -> None:
     path = _fp_store_path(workdir_root)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".json.tmp")
+        tmp = path.with_suffix(f".json.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
         tmp.write_text(json.dumps(store), "utf-8")
         tmp.replace(path)
     except OSError:
@@ -3806,7 +3806,12 @@ class Pipe:
         # that still type them; there is only the full agent loop.
         prompt = _strip_mode_prefix(prompt)
         repo_name, prompt = _extract_repo_prefix(prompt)
-        skip_cold_guard, prompt = _extract_resume_prefix(prompt)
+        skip_cold_guard = False
+        if self.valves.COLD_RESUME_GUARD:
+            skip_cold_guard, prompt = _extract_resume_prefix(prompt)
+            if not prompt.strip():
+                yield "_Add your message after `/resume`._"
+                return
         # Held as typed, `/effort` included, so a `continue` replays it whole.
         held_prompt = prompt
         effort_override, prompt = _extract_effort_prefix(prompt)
@@ -3926,11 +3931,6 @@ class Pipe:
         if chat_id:
             meta = _load_session_meta(workdir_root, chat_id)
             now = time.time()
-            if "cold_warned_at" in meta:
-                _update_session_meta(
-                    workdir_root, chat_id,
-                    {"cold_warned_at": None, "cold_warned_prompt": None},
-                )
             # Checked whatever the valve says: a warning already shown must
             # still release its held message if the guard is switched off.
             if _cold_warning_pending(meta, now):
@@ -4193,7 +4193,18 @@ class Pipe:
                                     _update_session_meta(
                                         workdir_root,
                                         chat_id,
-                                        {"session_id": session_id, "cwd": str(cwd)},
+                                        {
+                                            "session_id": session_id,
+                                            "cwd": str(cwd),
+                                            # Cleared only once a session is up,
+                                            # so a failed resume's cold retry
+                                            # still swaps in the held message.
+                                            "cold_warned_at": None,
+                                            "cold_warned_prompt": None,
+                                            # The cache is warm from here even
+                                            # if the turn is stopped mid-way.
+                                            "last_turn_at": int(time.time()),
+                                        },
                                     )
                             await emit_status(_session_status(
                                 bool(resume_id),
