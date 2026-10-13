@@ -708,6 +708,12 @@
         # paths in the prompt so the agent can Read them.
         attachment_notes = _save_image_attachments(body, workdir)
         notes = "\n\n" + "\n".join(attachment_notes) if attachment_notes else ""
+        turn_context = _extract_turn_context(body)
+        if turn_context:
+            notes += (
+                "\n\nOpen WebUI added this note about the current turn:\n"
+                + "\n".join(turn_context)
+            )
 
         if chat_id:
             meta = _load_session_meta(workdir_root, chat_id)

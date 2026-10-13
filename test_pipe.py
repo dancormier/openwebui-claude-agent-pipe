@@ -222,4 +222,23 @@ check("retry runs cold and replays the history", "resume" not in c2.options and 
 check("user is told why, then the reply streams", "Session expired — replaying history…" in statuses(events) and out == "Fresh", (statuses(events), out))
 check("new session id replaces the stale one", mod._chat_sessions["chat-4"] == "sess-4" and turn_info["session_id"] == "sess-4", turn_info)
 
+# ---- an Open WebUI <context> notice moves from the system prompt to the turn ----
+NOTICE = "<context>The requested image has been created and is now being shown to the user.</context>"
+FakeClient.scripts = [[init("sess-5"), *text("Done"), result()]]
+FakeClient.instances = []
+events, emit = recorder()
+ctx_body = {"messages": [
+    {"role": "system", "content": NOTICE + "\nYou are Otis."},
+    {"role": "user", "content": "make it blue"},
+]}
+out, _ = stream("chat-5", ctx_body, emit)
+client = FakeClient.instances[0]
+append = client.options["system_prompt"]["append"]
+check("notice is not in the system prompt, the workspace prompt still is",
+      "<context>" not in append and "You are Otis." in append, append)
+check("notice rides this turn's prompt",
+      client.queries == ["make it blue\n\nOpen WebUI added this note about the current turn:\n" + NOTICE], client.queries)
+check("no notice adds nothing to the prompt",
+      mod._extract_turn_context({"messages": [{"role": "system", "content": "You are Otis."}]}) == [])
+
 report("pipe turn-loop tests passed")

@@ -4,6 +4,15 @@ Patches on top of [tfriedel/openwebui-claude-code](https://github.com/tfriedel/o
 commit `5bbc1fc`, in the order they landed. Numbering matches the pipe's own
 comments and the pull requests that introduced them.
 
+## Unreleased
+
+- Open WebUI's per-turn notices (the `<context>` block saying an image was
+  generated, or that image generation failed) now reach the agent with the
+  turn they describe. They used to ride the system prompt, which a resumed
+  session keeps from its first turn: the first notice went stale on every
+  later turn, and a new one never arrived, so a reply could say no image was
+  made right under the image Open WebUI had just shown.
+
 ## v0.3.11 (2026-10-02)
 
 - New opt-in `COLD_RESUME_GUARD` valve (off by default). When a chat has
