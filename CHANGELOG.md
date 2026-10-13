@@ -4,7 +4,7 @@ Patches on top of [tfriedel/openwebui-claude-code](https://github.com/tfriedel/o
 commit `5bbc1fc`, in the order they landed. Numbering matches the pipe's own
 comments and the pull requests that introduced them.
 
-## Unreleased
+## v0.3.12 (2026-10-13)
 
 - Open WebUI's per-turn notices (the `<context>` block saying an image was
   generated, or that image generation failed) now reach the agent with the
