@@ -161,8 +161,8 @@ check("negative rearm disables", mod._ask_user_rearm_seconds(-1) == 0.0)
 
 # ---- which outcomes settle the wait ----
 check("answers settle", mod._ask_output_settles({"answers": {"q1": "x"}}, True))
-check("cancel waits while another send pends", not mod._ask_output_settles({"status": "cancelled"}, True))
-check("cancel settles when nothing else pends", mod._ask_output_settles({"status": "cancelled"}, False))
+check("origin cancel settles", mod._ask_output_settles({"status": "cancelled"}, True))
+check("cancel from another session never settles", not mod._ask_output_settles({"status": "cancelled", "elsewhere": True}, False))
 check("dead session settles even with others pending", mod._ask_output_settles({"error": "Client session disconnected."}, True))
 check("server timeout ignored while a re-send is pending", not mod._ask_output_settles({"error": "Event call timed out. The browser tab may be inactive or closed."}, True))
 check("server timeout settles when nothing else is pending", mod._ask_output_settles({"error": "Event call timed out. The browser tab may be inactive or closed."}, False))
@@ -184,9 +184,8 @@ c = Fake([None, answered])
 check("re-armed send answers, first cancelled", run(c) == answered and c.sends == 2 and c.cancels == 1, (c.sends, c.cancels))
 check("re-send carries the same payload", c.payloads[0] is c.payloads[1] is PAYLOAD)
 
-c = Fake([None, None, {"status": "cancelled"}, (0.02, answered)])
-r = run(c)
-check("cancel on a later send waits while earlier sends pend, a later answer wins", r == answered and c.sends == 4, (r, c.sends))
+c = Fake([None, None, {"status": "cancelled"}])
+check("origin cancel on a later send settles, both earlier sends cancelled", run(c)["status"] == "cancelled" and c.sends == 3 and c.cancels == 2, (c.sends, c.cancels))
 
 c = Fake([{"error": "Client session disconnected."}])
 check("error dict on first send returns immediately", run(c, rearm=1.0) == {"error": "Client session disconnected."} and c.sends == 1)
@@ -201,10 +200,10 @@ check("server timeout on the first send is ignored while a re-send is pending", 
 
 CANCELLED = {"status": "cancelled"}
 
-# ---- cancel: Open WebUI 0.12.2 acks a chat switch as a cancel, so it ends the wait only when nothing else pends ----
+# ---- cancel: Open WebUI 0.12.2 acks a chat switch as a cancel; the origin's ends the ask, any other session's waits ----
 c = Fake([(0.3, CANCELLED), (0.15, answered)])
 r = run(c, rearm=0.2)
-check("cancel from an older send waits for the pending re-send, which answers", r == answered and c.sends == 2 and c.cancels == 0, (r, c.sends, c.cancels))
+check("origin cancel from an older send settles while a re-send pends, re-send cancelled", r == CANCELLED and c.sends == 2 and c.cancels == 1, (r, c.sends, c.cancels))
 
 c = Fake([CANCELLED])
 check("cancel from the latest send settles at once, rearm disabled", run(c, rearm=0) == CANCELLED and c.sends == 1, c.sends)
@@ -339,11 +338,15 @@ check("fan-out: a cancel waits, another sid's answer wins and cancels the rest",
 
 s = Fake(sids=["origin", "tab"], scripts={"origin": (0.01, CANCELLED), "tab": (0.05, answered)})
 r = fan(s, origin="origin")
-check("fan-out: the origin's cancel waits too, the other tab's answer wins", r == answered, r)
+check("fan-out: the origin's cancel is final, other tab cancelled", r == CANCELLED and s.cancelled == ["tab"], (r, s.cancelled))
 
 s = Fake(sids=["a", "b"], scripts={"a": (0.01, CANCELLED), "b": (0.02, CANCELLED)})
 r = fan(s)
-check("fan-out: every sid cancelled returns the cancel", r == CANCELLED, r)
+check("fan-out: only non-origin cancels come back tagged for a re-send", r == {**CANCELLED, "elsewhere": True}, r)
+
+s = Fake(sids=["origin", "tab"], scripts={"origin": (0.15, answered), "tab": [(0.01, CANCELLED), None]})
+r = asyncio.run(mod._ask_with_rearm(mod._once_per_session_call(s.list_sids, s.send_to, "origin"), PAYLOAD, 5.0, 0.04))
+check("a background tab's cancel waits, it gets the form again, the origin's answer wins", r == answered and [sid for sid, _ in s.sent].count("tab") >= 2, (r, s.sent))
 
 s = Fake(sids=[["a"], ["a", "b"]], scripts={"a": None, "b": (0.01, answered)})
 r = asyncio.run(mod._ask_with_rearm(
