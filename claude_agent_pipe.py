@@ -856,8 +856,8 @@ _ASK_USER_MAX_OPTIONS = 3
 # countdown only for a positive number, and its expiry is the same cancel
 # path as the Cancel button, so it dismissed a form the user was still
 # typing into. The wait below is a backstop for a form that can never
-# answer — unmounted by a chat switch or reload, which sends no cancel and
-# hung the turn forever (seen 2026-09-03). The server's own bound
+# answer — unmounted by a chat switch or reload, which in 0.11.x sent no
+# cancel and hung the turn forever (seen 2026-09-03). The server's own bound
 # (WEBSOCKET_EVENT_CALLER_TIMEOUT, unset = forever) cuts the wait first if
 # it is shorter; the outcome is the same either way.
 _ASK_USER_WAIT_MINUTES = 30
@@ -882,13 +882,19 @@ _ASK_USER_CONDUIT_EXPIRY_S = 120.0
 _ASK_USER_CONDUIT_EXPIRY_WINDOW_S = 15.0
 _ASK_USER_REARM_SECONDS_MAX = 110
 _ASK_USER_TIMED_OUT = "Event call timed out: the form never answered."
+# Open WebUI 0.12.2 acks {status: cancelled} for a form on a chat that is not
+# on screen, and for every open form on chat switch, unmount or socket
+# disconnect (Chat.svelte `cancelBrowserInteractions`). The Cancel button
+# sends the same payload, so a cancel is read as a lost form, never a
+# decline, and it ends the wait only once no other session still holds one
+# (OTIS-324, 2026-10-16).
 _ASK_USER_UNANSWERED_INSTRUCTION = (
     "The user did not answer. Proceed on your best assumption and say "
     "which one you took."
 )
 _ASK_USER_LOST_INSTRUCTION = (
     "The form was lost before the user answered (chat switched, page "
-    "reloaded, or the wait ran out). Put the ask_in_reply text in your "
+    "reloaded, form dismissed, or the wait ran out). Put the ask_in_reply text in your "
     "reply verbatim, then end the turn without doing the work; the user's "
     "next message carries the answers."
 )
@@ -1015,15 +1021,22 @@ def _ask_output_settles(output: Any, others_pending: bool) -> bool:
     one send says nothing about a later re-send still in flight
     (WEBSOCKET_EVENT_CALLER_TIMEOUT below the valve ages the first call out
     before the pipe's own wait does), so it is ignored while others remain;
-    a cancel timed like Conduit's form expiry is never final; every other
-    outcome — answers, a real cancel, a dead session — is."""
+    a cancel timed like Conduit's form expiry is never final, and any other
+    cancel waits the same way while others remain; every other outcome —
+    answers, a dead session — is."""
     if _ask_output_expired(output):
+        return False
+    if others_pending and _ask_output_cancelled(output):
         return False
     if others_pending and isinstance(output, dict):
         reason = str(output.get("error") or "")
         if reason and "timed out" in reason.lower():
             return False
     return True
+
+
+def _ask_output_cancelled(output: Any) -> bool:
+    return isinstance(output, dict) and output.get("status") == "cancelled"
 
 
 def _ask_output_expired(output: Any) -> bool:
@@ -1145,9 +1158,9 @@ async def _fan_out_call(
     that were never looking. The same error from any other sid says nothing
     about the one the user is typing in, so it is ignored while others
     pend; all-failed returns the origin's error, else the first in sid
-    order. A cancel timed like Conduit's own form expiry is no verdict from
-    any sid, the origin included: it waits like an error and, once nothing
-    else pends, comes back still tagged so the caller can re-arm. No sids
+    order. A cancel is no verdict from any sid, the origin included: it
+    waits like an error and comes back only once nothing else pends, a
+    Conduit expiry cancel still tagged so the caller can re-arm. No sids
     at all is not a verdict either: every session may be mid-reconnect, so
     the call parks until the re-arm loop cancels it."""
     sids = list(list_sids() or [])
@@ -1165,7 +1178,7 @@ async def _fan_out_call(
             done, _ = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
             for task in done:
                 output = _task_output(task)
-                if not isinstance(output, dict) or _ask_output_expired(output):
+                if not isinstance(output, dict) or _ask_output_cancelled(output):
                     continue
                 if not output.get("error") or task is by_sid.get(origin_sid):
                     return output
@@ -1177,6 +1190,9 @@ async def _fan_out_call(
                 return output
         for output in outputs:
             if isinstance(output, dict) and output.get("error"):
+                return output
+        for output in outputs:
+            if _ask_output_cancelled(output):
                 return output
         return _task_output(tasks[0])
     finally:
@@ -1234,10 +1250,10 @@ def _answer_text(value: Any) -> str:
 def _map_user_input_response(
     output: Any, questions: List[Dict[str, Any]]
 ) -> Dict[str, Any]:
-    """Turn the form's reply into the tool result. A cancel means the user
-    saw the form and declined → `unanswered`. A timeout means the form was
-    unmounted before it could answer (the form itself never expires) →
-    `lost`, with the questions rendered for the reply. Any other error
+    """Turn the form's reply into the tool result. A cancel or a timeout
+    means the form went away unanswered — Cancel, a chat switch and a
+    reload all ack the same cancel — → `lost`, with the questions rendered
+    for the reply. A submit with nothing filled in → `unanswered`. Any other error
     means the form never reached them — a client that holds a socket
     session but rejects the payload (Conduit answers a free-text-only
     question with "Invalid user input request.", verified 2026-09-18), or
@@ -1259,8 +1275,9 @@ def _map_user_input_response(
                     "instruction": _ASK_USER_LOST_INSTRUCTION}
         return {**_no_ui_result(questions), "reason": reason}
     if output.get("status") == "cancelled":
-        return {"status": "unanswered", "reason": "cancelled",
-                "instruction": _ASK_USER_UNANSWERED_INSTRUCTION}
+        return {"status": "lost", "reason": "cancelled",
+                "ask_in_reply": _render_questions_markdown(questions),
+                "instruction": _ASK_USER_LOST_INSTRUCTION}
     raw = output.get("answers")
     if not isinstance(raw, dict):
         return {"status": "unanswered", "reason": "no answers",
@@ -2929,8 +2946,8 @@ _ASK_USER_PROMPT = (
     "text question that ends the turn and waits for an explicit yes. If the "
     "tool result's status is `no_ui` or `lost`, put its `ask_in_reply` text "
     "in your reply verbatim and end the turn; the next user message carries "
-    "the answers. If the status is `unanswered`, the user cancelled the form: "
-    "proceed on your best assumption and say which you took."
+    "the answers. If the status is `unanswered`, the user submitted the form "
+    "empty: proceed on your best assumption and say which you took."
 )
 
 def _owui_db_path(override: str = "") -> Optional[str]:
@@ -3367,8 +3384,10 @@ class Pipe:
                 "that have not yet received the form (a tab or device opened "
                 "after it fired), so a form already on screen is never "
                 "replaced and a half-typed answer survives. The web client "
-                "drops a form that arrives while the chat is not open or the "
-                "reply is not yet in view, and never says so; the questions "
+                "cancels a form when its chat is not on screen, the same "
+                "reply as the Cancel button, so a cancel ends the wait only "
+                "once no other session holds the form, and then the "
+                "questions are asked in text. The questions "
                 "are also streamed into the reply, and an answer typed into "
                 "the chat is delivered to the waiting form. Conduit dismisses "
                 "its form after 2 minutes; that cancel is recognised by its "

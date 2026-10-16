@@ -161,7 +161,8 @@ check("negative rearm disables", mod._ask_user_rearm_seconds(-1) == 0.0)
 
 # ---- which outcomes settle the wait ----
 check("answers settle", mod._ask_output_settles({"answers": {"q1": "x"}}, True))
-check("cancel settles", mod._ask_output_settles({"status": "cancelled"}, True))
+check("cancel waits while another send pends", not mod._ask_output_settles({"status": "cancelled"}, True))
+check("cancel settles when nothing else pends", mod._ask_output_settles({"status": "cancelled"}, False))
 check("dead session settles even with others pending", mod._ask_output_settles({"error": "Client session disconnected."}, True))
 check("server timeout ignored while a re-send is pending", not mod._ask_output_settles({"error": "Event call timed out. The browser tab may be inactive or closed."}, True))
 check("server timeout settles when nothing else is pending", mod._ask_output_settles({"error": "Event call timed out. The browser tab may be inactive or closed."}, False))
@@ -183,8 +184,9 @@ c = Fake([None, answered])
 check("re-armed send answers, first cancelled", run(c) == answered and c.sends == 2 and c.cancels == 1, (c.sends, c.cancels))
 check("re-send carries the same payload", c.payloads[0] is c.payloads[1] is PAYLOAD)
 
-c = Fake([None, None, {"status": "cancelled"}])
-check("cancel on a later send settles, both earlier sends cancelled", run(c)["status"] == "cancelled" and c.sends == 3 and c.cancels == 2, (c.sends, c.cancels))
+c = Fake([None, None, {"status": "cancelled"}, (0.02, answered)])
+r = run(c)
+check("cancel on a later send waits while earlier sends pend, a later answer wins", r == answered and c.sends == 4, (r, c.sends))
 
 c = Fake([{"error": "Client session disconnected."}])
 check("error dict on first send returns immediately", run(c, rearm=1.0) == {"error": "Client session disconnected."} and c.sends == 1)
@@ -199,10 +201,10 @@ check("server timeout on the first send is ignored while a re-send is pending", 
 
 CANCELLED = {"status": "cancelled"}
 
-# ---- cancel: a session is sent the form once, so any cancel is the user declining ----
+# ---- cancel: Open WebUI 0.12.2 acks a chat switch as a cancel, so it ends the wait only when nothing else pends ----
 c = Fake([(0.3, CANCELLED), (0.15, answered)])
 r = run(c, rearm=0.2)
-check("cancel from an older send settles while a re-send pends, re-send cancelled", r == CANCELLED and c.sends == 2 and c.cancels == 1, (r, c.sends, c.cancels))
+check("cancel from an older send waits for the pending re-send, which answers", r == answered and c.sends == 2 and c.cancels == 0, (r, c.sends, c.cancels))
 
 c = Fake([CANCELLED])
 check("cancel from the latest send settles at once, rearm disabled", run(c, rearm=0) == CANCELLED and c.sends == 1, c.sends)
@@ -218,7 +220,7 @@ TIMED_OUT = {"error": "Event call timed out. The browser tab may be inactive or 
 
 c = Fake([(0.32, CANCELLED), (0.02, TIMED_OUT)])
 r = run(c, rearm=0.2)
-check("latest timed out, older then cancels: the cancel settles", r == CANCELLED and c.sends == 2, (r, c.sends))
+check("latest timed out, older then cancels: the wait ends as lost", mod._map_user_input_response(r, norm)["status"] == "lost" and c.sends == 2, (r, c.sends))
 
 
 # ---- typed answer: a chat message resolves the wait ----
@@ -331,9 +333,17 @@ s = Fake(sids=["a", "origin"], scripts={"a": RuntimeError("boom"), "origin": (0.
 r = fan(s, origin="origin")
 check("fan-out: all failed with an origin returns the origin's error", r == TIMED_OUT, r)
 
-s = Fake(sids=["a", "b", "c"], scripts={"a": None, "b": (0.01, {"status": "cancelled"}), "c": None})
+s = Fake(sids=["a", "b", "c"], scripts={"a": (0.05, answered), "b": (0.01, CANCELLED), "c": None})
 r = fan(s)
-check("fan-out: cancel settles and cancels the rest", r == {"status": "cancelled"} and sorted(s.cancelled) == ["a", "c"], (r, s.cancelled))
+check("fan-out: a cancel waits, another sid's answer wins and cancels the rest", r == answered and s.cancelled == ["c"], (r, s.cancelled))
+
+s = Fake(sids=["origin", "tab"], scripts={"origin": (0.01, CANCELLED), "tab": (0.05, answered)})
+r = fan(s, origin="origin")
+check("fan-out: the origin's cancel waits too, the other tab's answer wins", r == answered, r)
+
+s = Fake(sids=["a", "b"], scripts={"a": (0.01, CANCELLED), "b": (0.02, CANCELLED)})
+r = fan(s)
+check("fan-out: every sid cancelled returns the cancel", r == CANCELLED, r)
 
 s = Fake(sids=[["a"], ["a", "b"]], scripts={"a": None, "b": (0.01, answered)})
 r = asyncio.run(mod._ask_with_rearm(
@@ -429,9 +439,9 @@ s = Fake(sids=["web", "conduit"], scripts={"web": (0.3, answered), "conduit": [(
 r = with_fast_expiry(lambda: asyncio.run(mod._ask_with_rearm(once(s), PAYLOAD, 5.0, 0.04)))
 check("expired session gets the form back on the next re-send, web answer still wins", r == answered and [sid for sid, _ in s.sent].count("conduit") == 2 and [sid for sid, _ in s.sent].count("web") == 1, (r, s.sent))
 
-s = Fake(sids=["web", "conduit"], scripts={"web": None, "conduit": (0.01, CANCELLED)})
+s = Fake(sids=["web", "conduit"], scripts={"web": (0.05, answered), "conduit": (0.01, CANCELLED)})
 r = with_fast_expiry(lambda: asyncio.run(mod._ask_with_rearm(once(s), PAYLOAD, 5.0, 1.0)))
-check("cancel well before the expiry is the user declining: final, web send cancelled", r == CANCELLED and s.cancelled == ["web"], (r, s.cancelled))
+check("cancel well before the expiry waits on the web send, whose answer wins", r == answered and s.cancelled == [], (r, s.cancelled))
 
 s = Fake(sids=["conduit"], scripts={"conduit": [(0.1, CANCELLED), (0.02, answered)]})
 r = with_fast_expiry(lambda: asyncio.run(mod._ask_with_rearm(once(s), PAYLOAD, 5.0, 0.04)))
@@ -461,7 +471,6 @@ check("typed chat answer → answered with the text and the typed instruction", 
 r = mod._map_user_input_response({"typed": "  "}, norm)
 check("blank typed → not treated as an answer", r["status"] == "unanswered", r)
 for name, out in [
-    ("cancelled", {"status": "cancelled"}),
     ("non-dict", None),
     ("no answers key", {"status": "answered"}),
     ("all blank", {"answers": {"q1": ""}}),
@@ -474,6 +483,8 @@ for name, err in [
 ]:
     r = mod._map_user_input_response({"error": err}, norm)
     check(f"{name} → lost with the markdown and the lost instruction", r["status"] == "lost" and r["ask_in_reply"] == md and r["instruction"] == mod._ASK_USER_LOST_INSTRUCTION and r["reason"] == err, r)
+r = mod._map_user_input_response(CANCELLED, norm)
+check("cancelled → lost with the markdown and the lost instruction", r["status"] == "lost" and r["ask_in_reply"] == md and r["instruction"] == mod._ASK_USER_LOST_INSTRUCTION and r["reason"] == "cancelled", r)
 for name, err in [("client without a form", "Invalid user input request."), ("dropped session", "Client session disconnected.")]:
     r = mod._map_user_input_response({"error": err}, norm)
     check(f"{name} → no_ui with the markdown", r["status"] == "no_ui" and r["ask_in_reply"] == md and r["reason"] == err, r)

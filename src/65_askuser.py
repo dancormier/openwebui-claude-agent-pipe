@@ -197,7 +197,7 @@ _ASK_USER_PROMPT = (
     "text question that ends the turn and waits for an explicit yes. If the "
     "tool result's status is `no_ui` or `lost`, put its `ask_in_reply` text "
     "in your reply verbatim and end the turn; the next user message carries "
-    "the answers. If the status is `unanswered`, the user cancelled the form: "
-    "proceed on your best assumption and say which you took."
+    "the answers. If the status is `unanswered`, the user submitted the form "
+    "empty: proceed on your best assumption and say which you took."
 )
 
