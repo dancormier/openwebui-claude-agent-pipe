@@ -4,6 +4,18 @@ Patches on top of [tfriedel/openwebui-claude-code](https://github.com/tfriedel/o
 commit `5bbc1fc`, in the order they landed. Numbering matches the pipe's own
 comments and the pull requests that introduced them.
 
+## v0.3.13 (2026-10-16)
+
+- Leaving a chat while a question form is open no longer reads as "you
+  closed the form". Open WebUI 0.12.2 answers a form with the same cancel as
+  the Cancel button when you switch chats, reload, or the chat is not on
+  screen, so the agent used to proceed on a guess. A cancel from the tab
+  that sent the message now ends the question, and the agent asks it in
+  text; your next message is the answer. A cancel from any other tab or
+  device is ignored and that session gets the form again at the next
+  re-send ([#75](https://github.com/dancormier/openwebui-claude-agent-pipe/pull/75),
+  [#76](https://github.com/dancormier/openwebui-claude-agent-pipe/pull/76)).
+
 ## v0.3.12 (2026-10-13)
 
 - Open WebUI's per-turn notices (the `<context>` block saying an image was
