@@ -886,7 +886,10 @@ _ASK_USER_TIMED_OUT = "Event call timed out: the form never answered."
 # on screen, and for every open form on chat switch, unmount or socket
 # disconnect (Chat.svelte `cancelBrowserInteractions`). The Cancel button
 # sends the same payload, so a cancel is read as a lost form, never a
-# decline, and it ends the wait only once no other session still holds one
+# decline. Only the originating session's cancel ends the wait: another tab
+# on another chat cancels the moment the form reaches it. A message typed
+# while the turn runs never reaches the pipe in 0.12.2 (the client queues
+# it, or stops the turn first), so the turn must end for the user to answer
 # (OTIS-324, 2026-10-16).
 _ASK_USER_UNANSWERED_INSTRUCTION = (
     "The user did not answer. Proceed on your best assumption and say "
@@ -1021,12 +1024,10 @@ def _ask_output_settles(output: Any, others_pending: bool) -> bool:
     one send says nothing about a later re-send still in flight
     (WEBSOCKET_EVENT_CALLER_TIMEOUT below the valve ages the first call out
     before the pipe's own wait does), so it is ignored while others remain;
-    a cancel timed like Conduit's form expiry is never final, and any other
-    cancel waits the same way while others remain; every other outcome —
-    answers, a dead session — is."""
-    if _ask_output_expired(output):
-        return False
-    if others_pending and _ask_output_cancelled(output):
+    a cancel timed like Conduit's form expiry, or from a session other than
+    the origin, is never final; every other outcome — answers, the origin's
+    cancel, a dead session — is."""
+    if _ask_output_retry(output):
         return False
     if others_pending and isinstance(output, dict):
         reason = str(output.get("error") or "")
@@ -1039,8 +1040,8 @@ def _ask_output_cancelled(output: Any) -> bool:
     return isinstance(output, dict) and output.get("status") == "cancelled"
 
 
-def _ask_output_expired(output: Any) -> bool:
-    return isinstance(output, dict) and output.get("status") == "cancelled" and bool(output.get("expired"))
+def _ask_output_retry(output: Any) -> bool:
+    return _ask_output_cancelled(output) and bool(output.get("expired") or output.get("elsewhere"))
 
 
 def _expired_cancel(output: Any, elapsed: float) -> bool:
@@ -1130,11 +1131,11 @@ async def _rearm_loop(
             if _ask_output_settles(output, True):
                 return output
         # Everything done and unsettled: the latest outcome stands,
-        # unless it is Conduit's expiry cancel, which only means that
+        # unless it is Conduit's expiry or another session's cancel: that
         # session needs the form again on the next send.
         if outputs and not any(not t.done() for t in tasks):
             last = _task_output(tasks[-1])
-            if not _ask_output_expired(last):
+            if not _ask_output_retry(last):
                 return last
         # A send leaves its ack callback registered in python-socketio's
         # manager until the client acks or disconnects
@@ -1158,9 +1159,9 @@ async def _fan_out_call(
     that were never looking. The same error from any other sid says nothing
     about the one the user is typing in, so it is ignored while others
     pend; all-failed returns the origin's error, else the first in sid
-    order. A cancel is no verdict from any sid, the origin included: it
-    waits like an error and comes back only once nothing else pends, a
-    Conduit expiry cancel still tagged so the caller can re-arm. No sids
+    order. A cancel from the origin is final, unless it is timed like
+    Conduit's form expiry. Any other cancel waits like an error and, once
+    nothing else pends, comes back tagged so the caller can re-arm. No sids
     at all is not a verdict either: every session may be mid-reconnect, so
     the call parks until the re-arm loop cancels it."""
     sids = list(list_sids() or [])
@@ -1178,22 +1179,25 @@ async def _fan_out_call(
             done, _ = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
             for task in done:
                 output = _task_output(task)
-                if not isinstance(output, dict) or _ask_output_cancelled(output):
+                if not isinstance(output, dict) or _ask_output_retry(output):
                     continue
-                if not output.get("error") or task is by_sid.get(origin_sid):
+                is_origin = task is by_sid.get(origin_sid)
+                if _ask_output_cancelled(output) and not is_origin:
+                    continue
+                if not output.get("error") or is_origin:
                     return output
         origin = by_sid.get(origin_sid)
         ordered = ([origin] if origin is not None else []) + tasks
         outputs = [_task_output(t) for t in ordered]
         for output in outputs:
-            if _ask_output_expired(output):
+            if _ask_output_retry(output):
                 return output
         for output in outputs:
             if isinstance(output, dict) and output.get("error"):
                 return output
         for output in outputs:
             if _ask_output_cancelled(output):
-                return output
+                return {**output, "elsewhere": True}
         return _task_output(tasks[0])
     finally:
         leftover = [t for t in tasks if not t.done()]
@@ -3385,11 +3389,11 @@ class Pipe:
                 "after it fired), so a form already on screen is never "
                 "replaced and a half-typed answer survives. The web client "
                 "cancels a form when its chat is not on screen, the same "
-                "reply as the Cancel button, so a cancel ends the wait only "
-                "once no other session holds the form, and then the "
-                "questions are asked in text. The questions "
-                "are also streamed into the reply, and an answer typed into "
-                "the chat is delivered to the waiting form. Conduit dismisses "
+                "reply as the Cancel button: a cancel from the session that "
+                "sent the message ends the ask and the questions are asked "
+                "in text; a cancel from any other session gets the form "
+                "again at the next re-send. The questions are also streamed "
+                "into the reply. Conduit dismisses "
                 "its form after 2 minutes; that cancel is recognised by its "
                 "timing and the form goes back to that session at the next "
                 "re-send."
