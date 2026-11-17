@@ -22,6 +22,7 @@ chunks, status = mod._on_stream_event(ev("content_block_start", content_block={"
 check("first text block: no separator", chunks == [] and status is None)
 chunks, _ = mod._on_stream_event(ev("content_block_delta", delta={"type": "text_delta", "text": "hi"}, index=0), st, True)
 check("text delta streamed", chunks == ["hi"] and st.text_emitted)
+check("visible text is counted", st.text_chars == 2)
 chunks, _ = mod._on_stream_event(ev("content_block_start", content_block={"type": "text"}, index=1), st, True)
 check("second text block: paragraph break", chunks == ["\n\n"])
 chunks, _ = mod._on_stream_event(ev("content_block_delta", delta={"type": "text_delta", "text": ""}, index=1), st, True)

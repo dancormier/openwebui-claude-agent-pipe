@@ -68,6 +68,7 @@ def _build_ask_user_mcp_server(
     wait_minutes: int = _ASK_USER_WAIT_MINUTES,
     rearm_seconds: int = _ASK_USER_REARM_SECONDS,
     inflight: Optional[_InflightTurn] = None,
+    shown_chars: Optional[Callable[[], int]] = None,
 ):
     """Return (mcp_config, tool_names) for the ask_user tool. Registered even
     without an event_call factory: the tool then hands the questions back as
@@ -83,9 +84,12 @@ def _build_ask_user_mcp_server(
             "reply by asking the user something: a missing detail, a choice "
             "between approaches, a preference. Bundle every open question "
             "into one call. Give 2-3 options for a choice (short label, your "
-            "recommendation and its reason in that option's description); "
-            "give no options for an open-ended detail like a name or a "
-            "time, and the user gets a text field."
+            "recommendation and its reason in that option's description) "
+            "and the user gets a form to tap. Give no options for an "
+            "open-ended detail like a name or a time: the questions are then "
+            "printed in your reply for a typed answer. The user sees only "
+            "the questions, so write what the answer depends on in your "
+            "reply before calling."
         ),
         {
             "type": "object",
@@ -107,7 +111,7 @@ def _build_ask_user_mcp_server(
                                 "type": "array",
                                 "description": (
                                     "2-3 choices; omit for an open-ended "
-                                    "detail (the user gets a text field)"
+                                    "detail (asked in the reply, no form)"
                                 ),
                                 "maxItems": _ASK_USER_MAX_OPTIONS,
                                 "items": {
@@ -146,8 +150,11 @@ def _build_ask_user_mcp_server(
                 "content": [{"type": "text", "text": f"ask_user: {exc}"}],
                 "is_error": True,
             }
+        started = time.monotonic()
         if make_event_call is None:
             result = _no_ui_result(questions)
+        elif _needs_typing(questions):
+            result = _in_reply_result()
         else:
             payload = _user_input_payload(questions)
             typed = None
@@ -167,6 +174,19 @@ def _build_ask_user_mcp_server(
             if isinstance(output, dict) and output.get("error"):
                 log.warning("ask_user form not answered: %s", output["error"])
             result = _map_user_input_response(output, questions)
+        if shown_chars is not None:
+            # The tool call can reach here before the turn loop has drained
+            # the text deltas that preceded it; a result that came back
+            # without waiting on a form needs the loop to catch up first.
+            if time.monotonic() - started < 0.2:
+                await asyncio.sleep(0.2)
+            result = _with_shown_text(result, shown_chars())
+        log.info(
+            "ask_user %s%s after %.0fs",
+            result["status"],
+            f" ({result['reason']})" if result.get("reason") else "",
+            time.monotonic() - started,
+        )
         return {
             "content": [
                 {"type": "text", "text": json.dumps(result, ensure_ascii=False)}
@@ -185,12 +205,19 @@ _ASK_USER_PROMPT = (
     "Asking the user something: whenever your reply would end with a "
     "question for the user - a missing detail, a choice between approaches, "
     "a preference - call the `ask_user` tool instead of writing the question "
-    "as text. It shows a multiple-choice form and returns the answers in the "
-    "same turn, so you can finish the work without another round trip. "
-    "Bundle every open question into one call: at most 3 questions; 2-3 "
-    "options for a choice, with your recommendation and its reason in that "
-    "option's description, or no options for an open-ended detail like a "
-    "name or a time, which gives the user a text field. When the stakes are "
+    "as text. The user sees only the questions and options you pass to the "
+    "tool, so first write, as normal reply text, everything the answer "
+    "depends on: what you found, the draft, the trade-off. Text you have "
+    "not output is not on their screen; never refer to it as 'above'. When "
+    "every question has options, the tool shows a multiple-choice form and "
+    "returns the answers in the same turn, so you can finish the work "
+    "without another round trip. Bundle every open question into one call: "
+    "at most 3 questions; 2-3 options for a choice, with your recommendation "
+    "and its reason in that option's description. Give no options for an "
+    "open-ended detail like a name or a time: a typed answer never goes "
+    "through a form, so the tool prints the questions in your reply and "
+    "returns `in_reply`; end the turn there, and the next user message "
+    "carries the answers. When the stakes are "
     "low, prefer a sensible assumption you state over any question at all; "
     "but when you do ask, ask through the tool. One exception: a "
     "confirmation the rules require before a risky action stays a plain "

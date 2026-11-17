@@ -92,6 +92,7 @@ class _TurnState:
         # Whether any assistant text has streamed yet; consecutive text blocks
         # (one narration beat per tool round) get a paragraph break between.
         self.text_emitted = False
+        self.text_chars = 0
         # Tool calls seen since the last text block started. A text block that
         # follows tool activity is a new beat — the final reply is always one —
         # and gets a rule so the reader can find where the reply resumes.
@@ -163,6 +164,7 @@ def _on_stream_event(ev: Dict[str, Any], state: _TurnState, inline_details: bool
             text = delta.get("text", "")
             if text:
                 state.text_emitted = True
+                state.text_chars += len(text)
                 chunks.append(text)
         elif dt == "thinking_delta":
             idx = ev.get("index", 0)

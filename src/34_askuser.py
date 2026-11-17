@@ -67,6 +67,21 @@ _ASK_USER_NO_UI_INSTRUCTION = (
     "reply verbatim, then end the turn without doing the work; the user's "
     "next message carries the answers."
 )
+# The web client and Conduit both drop an open form on a socket reconnect,
+# a chat switch or an app switch, and whatever was typed into it goes with
+# it. Nothing server-side can hold that text, so a question that needs typing
+# is asked in the reply, where the chat's own message box keeps the draft.
+_ASK_USER_IN_REPLY_INSTRUCTION = (
+    "A question that needs a typed answer is not sent as a form. The "
+    "numbered questions are already printed in your reply, just above this "
+    "point: do not repeat them. Finish the reply and end the turn without "
+    "doing the work; the user's next message carries the answers."
+)
+# The agent tends to call the tool at the point it would have started
+# writing, then refers to a draft or findings as "above" that it never output
+# (20 of 57 asks had no text before them, 2026-11). Below this much visible
+# text the result says so.
+_ASK_USER_THIN_TEXT_CHARS = 200
 _ASK_USER_TYPED_INSTRUCTION = (
     "The user answered in the chat as text instead of the form. Read "
     "`typed` against the numbered questions and lettered options: it may "
@@ -468,6 +483,28 @@ def _no_ui_result(questions: List[Dict[str, Any]]) -> Dict[str, Any]:
         "ask_in_reply": _render_questions_markdown(questions),
         "instruction": _ASK_USER_NO_UI_INSTRUCTION,
     }
+
+
+def _in_reply_result() -> Dict[str, Any]:
+    return {"status": "in_reply", "instruction": _ASK_USER_IN_REPLY_INSTRUCTION}
+
+
+def _needs_typing(questions: List[Dict[str, Any]]) -> bool:
+    return any(not q["options"] for q in questions)
+
+
+def _with_shown_text(result: Dict[str, Any], shown_chars: int) -> Dict[str, Any]:
+    """Tell the agent how much of its reply the user had on screen when the
+    questions appeared."""
+    result = {**result, "text_shown_before": shown_chars}
+    if shown_chars < _ASK_USER_THIN_TEXT_CHARS:
+        result["note"] = (
+            f"Before these questions the user saw only {shown_chars} characters "
+            "of reply text from you in this turn. Findings, a draft or reasoning "
+            "you have not written out are not on their screen: write them in "
+            "your reply now, and never call them 'above' or 'earlier'."
+        )
+    return result
 
 
 def _ask_user_preview(tool_input: Dict[str, Any]) -> str:

@@ -770,6 +770,7 @@
         mcp_servers: Dict[str, Any] = {}
         if kb_server is not None:
             mcp_servers["knowledge"] = kb_server
+        state = _TurnState()
         if self.valves.ASK_USER:
             ask_server, ask_tool_names = _build_ask_user_mcp_server(
                 _fan_out_event_call(
@@ -782,6 +783,7 @@
                 self.valves.ASK_USER_WAIT_MINUTES,
                 self.valves.ASK_USER_REARM_SECONDS,
                 inflight=inflight,
+                shown_chars=lambda: state.text_chars,
             )
             mcp_servers["ask-user"] = ask_server
             allowed_tools = allowed_tools + ask_tool_names
@@ -914,7 +916,6 @@
         artifact_snapshot = _snapshot_artifacts(scan_dirs)
         artifact_base_url = _artifact_base_url(self.valves.PUBLIC_BASE_URL)
 
-        state = _TurnState()
         heartbeat_task: Optional[asyncio.Task] = None
         inline = self.valves.INLINE_TOOL_DETAILS
 

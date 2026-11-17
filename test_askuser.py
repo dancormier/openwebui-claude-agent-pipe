@@ -496,4 +496,19 @@ for name, err in [("client without a form", "Invalid user input request."), ("dr
 r = mod._no_ui_result(norm)
 check("no_ui result carries the markdown and the instruction", r["status"] == "no_ui" and r["ask_in_reply"] == md and "end the turn" in r["instruction"])
 
+print("typed answers stay out of the form")
+choice = {"question": "Which?", "options": ["A", "B"]}
+check("all-choice ask can use the form", not mod._needs_typing(mod._normalize_questions([choice])))
+check("an open question needs typing", mod._needs_typing(mod._normalize_questions([{"question": "Name?"}])))
+check("one open question sends the whole ask to the reply", mod._needs_typing(mod._normalize_questions([choice, {"question": "Name?"}])))
+r = mod._in_reply_result()
+check("in_reply tells the agent not to repeat and to end the turn", r["status"] == "in_reply" and "do not repeat" in r["instruction"] and "end the turn" in r["instruction"])
+
+print("the result says how much text the user saw")
+thin = mod._with_shown_text({"status": "answered", "answers": {"q1": "A"}}, 136)
+check("count is reported", thin["text_shown_before"] == 136 and thin["answers"] == {"q1": "A"})
+check("thin text gets the note", "136 characters" in thin.get("note", "") and "'above'" in thin["note"])
+full = mod._with_shown_text({"status": "answered"}, mod._ASK_USER_THIN_TEXT_CHARS)
+check("enough text gets no note", "note" not in full and full["text_shown_before"] == mod._ASK_USER_THIN_TEXT_CHARS)
+
 report("ask_user tests passed")
