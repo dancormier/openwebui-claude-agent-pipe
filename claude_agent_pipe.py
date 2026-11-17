@@ -906,6 +906,21 @@ _ASK_USER_NO_UI_INSTRUCTION = (
     "reply verbatim, then end the turn without doing the work; the user's "
     "next message carries the answers."
 )
+# The web client and Conduit both drop an open form on a socket reconnect,
+# a chat switch or an app switch, and whatever was typed into it goes with
+# it. Nothing server-side can hold that text, so a question that needs typing
+# is asked in the reply, where the chat's own message box keeps the draft.
+_ASK_USER_IN_REPLY_INSTRUCTION = (
+    "A question that needs a typed answer is not sent as a form. The "
+    "numbered questions are already printed in your reply, just above this "
+    "point: do not repeat them. Finish the reply and end the turn without "
+    "doing the work; the user's next message carries the answers."
+)
+# The agent tends to call the tool at the point it would have started
+# writing, then refers to a draft or findings as "above" that it never output
+# (20 of 57 asks had no text before them, 2026-11). Below this much visible
+# text the result says so.
+_ASK_USER_THIN_TEXT_CHARS = 200
 _ASK_USER_TYPED_INSTRUCTION = (
     "The user answered in the chat as text instead of the form. Read "
     "`typed` against the numbered questions and lettered options: it may "
@@ -949,7 +964,7 @@ def _normalize_questions(raw: Any) -> List[Dict[str, Any]]:
             description = str(opt.get("description") or "").strip()[:240]
             norm_options.append({"label": label, "description": description or label})
         # Conduit rejects the whole form when any question has one option,
-        # and one option is no choice anyway: the text field takes over.
+        # and one option is no choice anyway: it becomes an open question.
         if len(norm_options) < 2:
             norm_options = []
         qid = str(q.get("id") or f"q{index}").strip()[:64]
@@ -963,8 +978,8 @@ def _normalize_questions(raw: Any) -> List[Dict[str, Any]]:
                 or f"Question {index}",
                 "question": text,
                 "options": norm_options,
-                # Fewer than two options is not a choice; the free-text field
-                # is then the answer, so it cannot be switched off.
+                # Fewer than two options is not a choice; a typed answer is
+                # then the only one, so it cannot be switched off.
                 "allow_other": len(norm_options) < 2 or bool(q.get("allow_other", True)),
             }
         )
@@ -1309,6 +1324,28 @@ def _no_ui_result(questions: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
+def _in_reply_result() -> Dict[str, Any]:
+    return {"status": "in_reply", "instruction": _ASK_USER_IN_REPLY_INSTRUCTION}
+
+
+def _needs_typing(questions: List[Dict[str, Any]]) -> bool:
+    return any(not q["options"] for q in questions)
+
+
+def _with_shown_text(result: Dict[str, Any], shown_chars: int) -> Dict[str, Any]:
+    """Tell the agent how much of its reply the user had on screen when the
+    questions appeared."""
+    result = {**result, "text_shown_before": shown_chars}
+    if shown_chars < _ASK_USER_THIN_TEXT_CHARS:
+        result["note"] = (
+            f"Before these questions the user saw only {shown_chars} characters "
+            "of reply text from you in this turn. Findings, a draft or reasoning "
+            "you have not written out are not on their screen: write them in "
+            "your reply now, and never call them 'above' or 'earlier'."
+        )
+    return result
+
+
 def _ask_user_preview(tool_input: Dict[str, Any]) -> str:
     questions = tool_input.get("questions")
     if isinstance(questions, list) and questions:
@@ -1412,6 +1449,7 @@ class _TurnState:
         # Whether any assistant text has streamed yet; consecutive text blocks
         # (one narration beat per tool round) get a paragraph break between.
         self.text_emitted = False
+        self.text_chars = 0
         # Tool calls seen since the last text block started. A text block that
         # follows tool activity is a new beat — the final reply is always one —
         # and gets a rule so the reader can find where the reply resumes.
@@ -1483,6 +1521,7 @@ def _on_stream_event(ev: Dict[str, Any], state: _TurnState, inline_details: bool
             text = delta.get("text", "")
             if text:
                 state.text_emitted = True
+                state.text_chars += len(text)
                 chunks.append(text)
         elif dt == "thinking_delta":
             idx = ev.get("index", 0)
@@ -1538,7 +1577,9 @@ def _on_tool_use(
     if agent:
         agent["tools"] += 1
         label = f"↳ {agent['label']} · {label}"
-    state.active_tools[tool_id] = {"label": label, "started": now, "name": name}
+    state.active_tools[tool_id] = {
+        "label": label, "started": now, "name": name, "subagent": parent_id is not None,
+    }
     chunks: List[str] = []
     if inline_details:
         summary_text = f"🔧 {name}" + (f" · {preview}" if preview else "")
@@ -1602,6 +1643,26 @@ def _session_status(resumed: bool, history: List[Dict[str, Any]]) -> str:
     if _history_fingerprint(history) != _EMPTY_FP:
         return "Session: cold start — history replayed"
     return "Session: new chat"
+
+
+async def _text_before_ask(state: _TurnState, timeout: float = 5.0) -> Optional[int]:
+    """Characters of reply text the user had on screen when ask_user was
+    called, or None when a subagent is the one asking: its text never
+    reaches the user, and it cannot end the turn.
+
+    The SDK starts the tool call as soon as it reads it, while the turn loop
+    may still be working through the text deltas queued ahead of it. The
+    loop registers the call in `active_tools` only after those, in order, so
+    its entry is the signal that the count is complete."""
+    deadline = time.monotonic() + timeout
+    while True:
+        asks = [t for t in state.active_tools.values() if t.get("name") == _ASK_USER_TOOL]
+        if asks or time.monotonic() >= deadline:
+            break
+        await asyncio.sleep(0.05)
+    if asks and all(t.get("subagent") for t in asks):
+        return None
+    return state.text_chars
 
 
 def _only_ask_user(active_tools: Dict[str, Dict[str, Any]]) -> bool:
@@ -2821,6 +2882,7 @@ def _build_ask_user_mcp_server(
     wait_minutes: int = _ASK_USER_WAIT_MINUTES,
     rearm_seconds: int = _ASK_USER_REARM_SECONDS,
     inflight: Optional[_InflightTurn] = None,
+    text_before_ask: Optional[Callable[[], Any]] = None,
 ):
     """Return (mcp_config, tool_names) for the ask_user tool. Registered even
     without an event_call factory: the tool then hands the questions back as
@@ -2836,9 +2898,12 @@ def _build_ask_user_mcp_server(
             "reply by asking the user something: a missing detail, a choice "
             "between approaches, a preference. Bundle every open question "
             "into one call. Give 2-3 options for a choice (short label, your "
-            "recommendation and its reason in that option's description); "
-            "give no options for an open-ended detail like a name or a "
-            "time, and the user gets a text field."
+            "recommendation and its reason in that option's description) "
+            "and the user gets a form to tap. Give no options for an "
+            "open-ended detail like a name or a time: the questions are then "
+            "printed in your reply for a typed answer. The user sees only "
+            "the questions, so write what the answer depends on in your "
+            "reply before calling."
         ),
         {
             "type": "object",
@@ -2860,7 +2925,7 @@ def _build_ask_user_mcp_server(
                                 "type": "array",
                                 "description": (
                                     "2-3 choices; omit for an open-ended "
-                                    "detail (the user gets a text field)"
+                                    "detail (asked in the reply, no form)"
                                 ),
                                 "maxItems": _ASK_USER_MAX_OPTIONS,
                                 "items": {
@@ -2899,8 +2964,12 @@ def _build_ask_user_mcp_server(
                 "content": [{"type": "text", "text": f"ask_user: {exc}"}],
                 "is_error": True,
             }
+        started = time.monotonic()
+        shown = await text_before_ask() if text_before_ask else None
         if make_event_call is None:
             result = _no_ui_result(questions)
+        elif _needs_typing(questions) and shown is not None:
+            result = _in_reply_result()
         else:
             payload = _user_input_payload(questions)
             typed = None
@@ -2920,6 +2989,14 @@ def _build_ask_user_mcp_server(
             if isinstance(output, dict) and output.get("error"):
                 log.warning("ask_user form not answered: %s", output["error"])
             result = _map_user_input_response(output, questions)
+        if shown is not None:
+            result = _with_shown_text(result, shown)
+        log.info(
+            "ask_user %s%s after %.0fs",
+            result["status"],
+            f" ({result['reason']})" if result.get("reason") else "",
+            time.monotonic() - started,
+        )
         return {
             "content": [
                 {"type": "text", "text": json.dumps(result, ensure_ascii=False)}
@@ -2938,12 +3015,19 @@ _ASK_USER_PROMPT = (
     "Asking the user something: whenever your reply would end with a "
     "question for the user - a missing detail, a choice between approaches, "
     "a preference - call the `ask_user` tool instead of writing the question "
-    "as text. It shows a multiple-choice form and returns the answers in the "
-    "same turn, so you can finish the work without another round trip. "
-    "Bundle every open question into one call: at most 3 questions; 2-3 "
-    "options for a choice, with your recommendation and its reason in that "
-    "option's description, or no options for an open-ended detail like a "
-    "name or a time, which gives the user a text field. When the stakes are "
+    "as text. The user sees only the questions and options you pass to the "
+    "tool, so first write, as normal reply text, everything the answer "
+    "depends on: what you found, the draft, the trade-off. Text you have "
+    "not output is not on their screen; never refer to it as 'above'. When "
+    "every question has options, the tool shows a multiple-choice form and "
+    "returns the answers in the same turn, so you can finish the work "
+    "without another round trip. Bundle every open question into one call: "
+    "at most 3 questions; 2-3 options for a choice, with your recommendation "
+    "and its reason in that option's description. Give no options for an "
+    "open-ended detail like a name or a time: a typed answer never goes "
+    "through a form, so the tool prints the questions in your reply and "
+    "returns `in_reply`; end the turn there, and the next user message "
+    "carries the answers. When the stakes are "
     "low, prefer a sensible assumption you state over any question at all; "
     "but when you do ask, ask through the tool. One exception: a "
     "confirmation the rules require before a risky action stays a plain "
@@ -3445,9 +3529,11 @@ class Pipe:
             description=(
                 "Register the ask_user tool: the agent can pause mid-turn and "
                 "show a multiple-choice form (Open WebUI's request:user_input "
-                "event). Clients without a socket session (mobile apps, API "
-                "callers) get the questions as markdown in the reply and "
-                "answer in the next message instead."
+                "event). A question that needs a typed answer is printed in "
+                "the reply instead and answered in the next message, because "
+                "the client drops an open form, and the text typed into it, "
+                "on a reconnect or a chat switch. Clients without a socket "
+                "session (mobile apps, API callers) get every question that way."
             ),
         )
         ASK_USER_WAIT_MINUTES: int = Field(
@@ -4119,6 +4205,7 @@ class Pipe:
         mcp_servers: Dict[str, Any] = {}
         if kb_server is not None:
             mcp_servers["knowledge"] = kb_server
+        state = _TurnState()
         if self.valves.ASK_USER:
             ask_server, ask_tool_names = _build_ask_user_mcp_server(
                 _fan_out_event_call(
@@ -4131,6 +4218,7 @@ class Pipe:
                 self.valves.ASK_USER_WAIT_MINUTES,
                 self.valves.ASK_USER_REARM_SECONDS,
                 inflight=inflight,
+                text_before_ask=lambda: _text_before_ask(state),
             )
             mcp_servers["ask-user"] = ask_server
             allowed_tools = allowed_tools + ask_tool_names
@@ -4263,7 +4351,6 @@ class Pipe:
         artifact_snapshot = _snapshot_artifacts(scan_dirs)
         artifact_base_url = _artifact_base_url(self.valves.PUBLIC_BASE_URL)
 
-        state = _TurnState()
         heartbeat_task: Optional[asyncio.Task] = None
         inline = self.valves.INLINE_TOOL_DETAILS
 

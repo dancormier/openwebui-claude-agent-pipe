@@ -92,6 +92,7 @@ class _TurnState:
         # Whether any assistant text has streamed yet; consecutive text blocks
         # (one narration beat per tool round) get a paragraph break between.
         self.text_emitted = False
+        self.text_chars = 0
         # Tool calls seen since the last text block started. A text block that
         # follows tool activity is a new beat — the final reply is always one —
         # and gets a rule so the reader can find where the reply resumes.
@@ -163,6 +164,7 @@ def _on_stream_event(ev: Dict[str, Any], state: _TurnState, inline_details: bool
             text = delta.get("text", "")
             if text:
                 state.text_emitted = True
+                state.text_chars += len(text)
                 chunks.append(text)
         elif dt == "thinking_delta":
             idx = ev.get("index", 0)
@@ -218,7 +220,9 @@ def _on_tool_use(
     if agent:
         agent["tools"] += 1
         label = f"↳ {agent['label']} · {label}"
-    state.active_tools[tool_id] = {"label": label, "started": now, "name": name}
+    state.active_tools[tool_id] = {
+        "label": label, "started": now, "name": name, "subagent": parent_id is not None,
+    }
     chunks: List[str] = []
     if inline_details:
         summary_text = f"🔧 {name}" + (f" · {preview}" if preview else "")
@@ -282,6 +286,26 @@ def _session_status(resumed: bool, history: List[Dict[str, Any]]) -> str:
     if _history_fingerprint(history) != _EMPTY_FP:
         return "Session: cold start — history replayed"
     return "Session: new chat"
+
+
+async def _text_before_ask(state: _TurnState, timeout: float = 5.0) -> Optional[int]:
+    """Characters of reply text the user had on screen when ask_user was
+    called, or None when a subagent is the one asking: its text never
+    reaches the user, and it cannot end the turn.
+
+    The SDK starts the tool call as soon as it reads it, while the turn loop
+    may still be working through the text deltas queued ahead of it. The
+    loop registers the call in `active_tools` only after those, in order, so
+    its entry is the signal that the count is complete."""
+    deadline = time.monotonic() + timeout
+    while True:
+        asks = [t for t in state.active_tools.values() if t.get("name") == _ASK_USER_TOOL]
+        if asks or time.monotonic() >= deadline:
+            break
+        await asyncio.sleep(0.05)
+    if asks and all(t.get("subagent") for t in asks):
+        return None
+    return state.text_chars
 
 
 def _only_ask_user(active_tools: Dict[str, Dict[str, Any]]) -> bool:

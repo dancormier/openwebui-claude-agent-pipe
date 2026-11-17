@@ -98,9 +98,11 @@
             description=(
                 "Register the ask_user tool: the agent can pause mid-turn and "
                 "show a multiple-choice form (Open WebUI's request:user_input "
-                "event). Clients without a socket session (mobile apps, API "
-                "callers) get the questions as markdown in the reply and "
-                "answer in the next message instead."
+                "event). A question that needs a typed answer is printed in "
+                "the reply instead and answered in the next message, because "
+                "the client drops an open form, and the text typed into it, "
+                "on a reconnect or a chat switch. Clients without a socket "
+                "session (mobile apps, API callers) get every question that way."
             ),
         )
         ASK_USER_WAIT_MINUTES: int = Field(
@@ -772,6 +774,7 @@
         mcp_servers: Dict[str, Any] = {}
         if kb_server is not None:
             mcp_servers["knowledge"] = kb_server
+        state = _TurnState()
         if self.valves.ASK_USER:
             ask_server, ask_tool_names = _build_ask_user_mcp_server(
                 _fan_out_event_call(
@@ -784,6 +787,7 @@
                 self.valves.ASK_USER_WAIT_MINUTES,
                 self.valves.ASK_USER_REARM_SECONDS,
                 inflight=inflight,
+                text_before_ask=lambda: _text_before_ask(state),
             )
             mcp_servers["ask-user"] = ask_server
             allowed_tools = allowed_tools + ask_tool_names
@@ -916,7 +920,6 @@
         artifact_snapshot = _snapshot_artifacts(scan_dirs)
         artifact_base_url = _artifact_base_url(self.valves.PUBLIC_BASE_URL)
 
-        state = _TurnState()
         heartbeat_task: Optional[asyncio.Task] = None
         inline = self.valves.INLINE_TOOL_DETAILS
 

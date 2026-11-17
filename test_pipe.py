@@ -10,6 +10,7 @@ session bookkeeping and interrupt handling with no CLI behind it.
 
 import asyncio
 import atexit
+import json
 import pathlib
 import shutil
 import sys
@@ -240,5 +241,50 @@ check("notice rides this turn's prompt",
       client.queries == ["make it blue\n\nOpen WebUI added this note about the current turn:\n" + NOTICE], client.queries)
 check("no notice adds nothing to the prompt",
       mod._extract_turn_context({"messages": [{"role": "system", "content": "You are Otis."}]}) == [])
+
+print("ask_user tool: typed questions skip the form, results carry the shown-text count")
+
+
+def run_ask(args, shown, event_output=None):
+    sent = []
+
+    async def event_call(payload):
+        sent.append(payload)
+        return event_output
+
+    async def text_before_ask():
+        return shown
+
+    server, _ = mod._build_ask_user_mcp_server(
+        (lambda: event_call) if event_output is not None else None,
+        text_before_ask=text_before_ask,
+    )
+    out = asyncio.run(server["tools"][0](args))
+    return json.loads(out["content"][0]["text"]), sent
+
+
+choice = {"id": "c", "question": "Which?", "options": [
+    {"label": "A", "description": "a"}, {"label": "B", "description": "b"}]}
+answered = {"answers": {"c": {"type": "option", "label": "A"}}}
+
+result, sent = run_ask({"questions": [choice, {"question": "Name?"}]}, 0, answered)
+check("an open question sends no form", sent == [] and result["status"] == "in_reply", result)
+check("thin text is flagged on in_reply", result["text_shown_before"] == 0 and "note" in result, result)
+
+result, sent = run_ask({"questions": [choice]}, 900, answered)
+check("an all-choice ask goes to the form", len(sent) == 1 and result["status"] == "answered", result)
+check("enough text: count, no note", result["text_shown_before"] == 900 and "note" not in result, result)
+
+result, _ = run_ask({"questions": [choice]}, 40, {"status": "cancelled"})
+check("a lost form still carries the count and note", result["status"] == "lost" and "40 characters" in result["note"], result)
+
+result, sent = run_ask({"questions": [choice, {"question": "Name?"}]}, None, answered)
+check("a subagent's open question keeps the form", len(sent) == 1 and result["status"] == "answered", result)
+check("a subagent's result carries no count or note", "text_shown_before" not in result and "note" not in result, result)
+
+check("prompt says to write first and names in_reply", "first write" in mod._ASK_USER_PROMPT and "`in_reply`" in mod._ASK_USER_PROMPT)
+
+result, sent = run_ask({"questions": [choice]}, 900)
+check("no form client: no_ui as before", result["status"] == "no_ui" and "ask_in_reply" in result, result)
 
 report("pipe turn-loop tests passed")

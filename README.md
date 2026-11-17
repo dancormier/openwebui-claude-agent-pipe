@@ -46,7 +46,9 @@ repo is where the idea came from.
 - **`ask_user`** — the agent can pause and ask up to three multiple-choice
   questions through Open WebUI's own form, and get the answers in the same turn.
   The questions also appear in the reply, and typing an answer in the chat
-  works when the form is not showing.
+  works when the form is not showing. A question that needs a typed answer
+  skips the form and is answered in the next message, so a dropped form
+  cannot take typed text with it.
 - **Earlier chats** — `search_chats` / `read_chat` let the agent look up the
   calling user's past conversations (sqlite deployments; read-only; scoped to
   that user).
