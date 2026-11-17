@@ -68,7 +68,7 @@ def _build_ask_user_mcp_server(
     wait_minutes: int = _ASK_USER_WAIT_MINUTES,
     rearm_seconds: int = _ASK_USER_REARM_SECONDS,
     inflight: Optional[_InflightTurn] = None,
-    shown_chars: Optional[Callable[[], int]] = None,
+    text_before_ask: Optional[Callable[[], Any]] = None,
 ):
     """Return (mcp_config, tool_names) for the ask_user tool. Registered even
     without an event_call factory: the tool then hands the questions back as
@@ -151,9 +151,10 @@ def _build_ask_user_mcp_server(
                 "is_error": True,
             }
         started = time.monotonic()
+        shown = await text_before_ask() if text_before_ask else None
         if make_event_call is None:
             result = _no_ui_result(questions)
-        elif _needs_typing(questions):
+        elif _needs_typing(questions) and shown is not None:
             result = _in_reply_result()
         else:
             payload = _user_input_payload(questions)
@@ -174,13 +175,8 @@ def _build_ask_user_mcp_server(
             if isinstance(output, dict) and output.get("error"):
                 log.warning("ask_user form not answered: %s", output["error"])
             result = _map_user_input_response(output, questions)
-        if shown_chars is not None:
-            # The tool call can reach here before the turn loop has drained
-            # the text deltas that preceded it; a result that came back
-            # without waiting on a form needs the loop to catch up first.
-            if time.monotonic() - started < 0.2:
-                await asyncio.sleep(0.2)
-            result = _with_shown_text(result, shown_chars())
+        if shown is not None:
+            result = _with_shown_text(result, shown)
         log.info(
             "ask_user %s%s after %.0fs",
             result["status"],

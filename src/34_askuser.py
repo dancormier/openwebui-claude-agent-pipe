@@ -125,7 +125,7 @@ def _normalize_questions(raw: Any) -> List[Dict[str, Any]]:
             description = str(opt.get("description") or "").strip()[:240]
             norm_options.append({"label": label, "description": description or label})
         # Conduit rejects the whole form when any question has one option,
-        # and one option is no choice anyway: the text field takes over.
+        # and one option is no choice anyway: it becomes an open question.
         if len(norm_options) < 2:
             norm_options = []
         qid = str(q.get("id") or f"q{index}").strip()[:64]
@@ -139,8 +139,8 @@ def _normalize_questions(raw: Any) -> List[Dict[str, Any]]:
                 or f"Question {index}",
                 "question": text,
                 "options": norm_options,
-                # Fewer than two options is not a choice; the free-text field
-                # is then the answer, so it cannot be switched off.
+                # Fewer than two options is not a choice; a typed answer is
+                # then the only one, so it cannot be switched off.
                 "allow_other": len(norm_options) < 2 or bool(q.get("allow_other", True)),
             }
         )

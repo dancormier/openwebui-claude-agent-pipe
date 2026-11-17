@@ -964,7 +964,7 @@ def _normalize_questions(raw: Any) -> List[Dict[str, Any]]:
             description = str(opt.get("description") or "").strip()[:240]
             norm_options.append({"label": label, "description": description or label})
         # Conduit rejects the whole form when any question has one option,
-        # and one option is no choice anyway: the text field takes over.
+        # and one option is no choice anyway: it becomes an open question.
         if len(norm_options) < 2:
             norm_options = []
         qid = str(q.get("id") or f"q{index}").strip()[:64]
@@ -978,8 +978,8 @@ def _normalize_questions(raw: Any) -> List[Dict[str, Any]]:
                 or f"Question {index}",
                 "question": text,
                 "options": norm_options,
-                # Fewer than two options is not a choice; the free-text field
-                # is then the answer, so it cannot be switched off.
+                # Fewer than two options is not a choice; a typed answer is
+                # then the only one, so it cannot be switched off.
                 "allow_other": len(norm_options) < 2 or bool(q.get("allow_other", True)),
             }
         )
@@ -1577,7 +1577,9 @@ def _on_tool_use(
     if agent:
         agent["tools"] += 1
         label = f"↳ {agent['label']} · {label}"
-    state.active_tools[tool_id] = {"label": label, "started": now, "name": name}
+    state.active_tools[tool_id] = {
+        "label": label, "started": now, "name": name, "subagent": parent_id is not None,
+    }
     chunks: List[str] = []
     if inline_details:
         summary_text = f"🔧 {name}" + (f" · {preview}" if preview else "")
@@ -1641,6 +1643,26 @@ def _session_status(resumed: bool, history: List[Dict[str, Any]]) -> str:
     if _history_fingerprint(history) != _EMPTY_FP:
         return "Session: cold start — history replayed"
     return "Session: new chat"
+
+
+async def _text_before_ask(state: _TurnState, timeout: float = 5.0) -> Optional[int]:
+    """Characters of reply text the user had on screen when ask_user was
+    called, or None when a subagent is the one asking: its text never
+    reaches the user, and it cannot end the turn.
+
+    The SDK starts the tool call as soon as it reads it, while the turn loop
+    may still be working through the text deltas queued ahead of it. The
+    loop registers the call in `active_tools` only after those, in order, so
+    its entry is the signal that the count is complete."""
+    deadline = time.monotonic() + timeout
+    while True:
+        asks = [t for t in state.active_tools.values() if t.get("name") == _ASK_USER_TOOL]
+        if asks or time.monotonic() >= deadline:
+            break
+        await asyncio.sleep(0.05)
+    if asks and all(t.get("subagent") for t in asks):
+        return None
+    return state.text_chars
 
 
 def _only_ask_user(active_tools: Dict[str, Dict[str, Any]]) -> bool:
@@ -2860,7 +2882,7 @@ def _build_ask_user_mcp_server(
     wait_minutes: int = _ASK_USER_WAIT_MINUTES,
     rearm_seconds: int = _ASK_USER_REARM_SECONDS,
     inflight: Optional[_InflightTurn] = None,
-    shown_chars: Optional[Callable[[], int]] = None,
+    text_before_ask: Optional[Callable[[], Any]] = None,
 ):
     """Return (mcp_config, tool_names) for the ask_user tool. Registered even
     without an event_call factory: the tool then hands the questions back as
@@ -2943,9 +2965,10 @@ def _build_ask_user_mcp_server(
                 "is_error": True,
             }
         started = time.monotonic()
+        shown = await text_before_ask() if text_before_ask else None
         if make_event_call is None:
             result = _no_ui_result(questions)
-        elif _needs_typing(questions):
+        elif _needs_typing(questions) and shown is not None:
             result = _in_reply_result()
         else:
             payload = _user_input_payload(questions)
@@ -2966,13 +2989,8 @@ def _build_ask_user_mcp_server(
             if isinstance(output, dict) and output.get("error"):
                 log.warning("ask_user form not answered: %s", output["error"])
             result = _map_user_input_response(output, questions)
-        if shown_chars is not None:
-            # The tool call can reach here before the turn loop has drained
-            # the text deltas that preceded it; a result that came back
-            # without waiting on a form needs the loop to catch up first.
-            if time.monotonic() - started < 0.2:
-                await asyncio.sleep(0.2)
-            result = _with_shown_text(result, shown_chars())
+        if shown is not None:
+            result = _with_shown_text(result, shown)
         log.info(
             "ask_user %s%s after %.0fs",
             result["status"],
@@ -3425,9 +3443,11 @@ class Pipe:
             description=(
                 "Register the ask_user tool: the agent can pause mid-turn and "
                 "show a multiple-choice form (Open WebUI's request:user_input "
-                "event). Clients without a socket session (mobile apps, API "
-                "callers) get the questions as markdown in the reply and "
-                "answer in the next message instead."
+                "event). A question that needs a typed answer is printed in "
+                "the reply instead and answered in the next message, because "
+                "the client drops an open form, and the text typed into it, "
+                "on a reconnect or a chat switch. Clients without a socket "
+                "session (mobile apps, API callers) get every question that way."
             ),
         )
         ASK_USER_WAIT_MINUTES: int = Field(
@@ -4110,7 +4130,7 @@ class Pipe:
                 self.valves.ASK_USER_WAIT_MINUTES,
                 self.valves.ASK_USER_REARM_SECONDS,
                 inflight=inflight,
-                shown_chars=lambda: state.text_chars,
+                text_before_ask=lambda: _text_before_ask(state),
             )
             mcp_servers["ask-user"] = ask_server
             allowed_tools = allowed_tools + ask_tool_names

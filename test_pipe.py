@@ -252,9 +252,12 @@ def run_ask(args, shown, event_output=None):
         sent.append(payload)
         return event_output
 
+    async def text_before_ask():
+        return shown
+
     server, _ = mod._build_ask_user_mcp_server(
         (lambda: event_call) if event_output is not None else None,
-        shown_chars=lambda: shown,
+        text_before_ask=text_before_ask,
     )
     out = asyncio.run(server["tools"][0](args))
     return json.loads(out["content"][0]["text"]), sent
@@ -274,6 +277,10 @@ check("enough text: count, no note", result["text_shown_before"] == 900 and "not
 
 result, _ = run_ask({"questions": [choice]}, 40, {"status": "cancelled"})
 check("a lost form still carries the count and note", result["status"] == "lost" and "40 characters" in result["note"], result)
+
+result, sent = run_ask({"questions": [choice, {"question": "Name?"}]}, None, answered)
+check("a subagent's open question keeps the form", len(sent) == 1 and result["status"] == "answered", result)
+check("a subagent's result carries no count or note", "text_shown_before" not in result and "note" not in result, result)
 
 check("prompt says to write first and names in_reply", "first write" in mod._ASK_USER_PROMPT and "`in_reply`" in mod._ASK_USER_PROMPT)
 

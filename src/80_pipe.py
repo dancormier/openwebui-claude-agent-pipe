@@ -98,9 +98,11 @@
             description=(
                 "Register the ask_user tool: the agent can pause mid-turn and "
                 "show a multiple-choice form (Open WebUI's request:user_input "
-                "event). Clients without a socket session (mobile apps, API "
-                "callers) get the questions as markdown in the reply and "
-                "answer in the next message instead."
+                "event). A question that needs a typed answer is printed in "
+                "the reply instead and answered in the next message, because "
+                "the client drops an open form, and the text typed into it, "
+                "on a reconnect or a chat switch. Clients without a socket "
+                "session (mobile apps, API callers) get every question that way."
             ),
         )
         ASK_USER_WAIT_MINUTES: int = Field(
@@ -783,7 +785,7 @@
                 self.valves.ASK_USER_WAIT_MINUTES,
                 self.valves.ASK_USER_REARM_SECONDS,
                 inflight=inflight,
-                shown_chars=lambda: state.text_chars,
+                text_before_ask=lambda: _text_before_ask(state),
             )
             mcp_servers["ask-user"] = ask_server
             allowed_tools = allowed_tools + ask_tool_names

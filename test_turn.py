@@ -7,6 +7,8 @@ The handlers take plain values and return (chunks, status), so no SDK types
 are needed.
 """
 
+import asyncio
+
 from _loader import check, load_head, report
 
 mod = load_head()
@@ -195,5 +197,29 @@ check("Agent result closes with summary", status == "✅ researcher: Look up X �
 
 check("done line counts subagents", mod._done_line(5000, 3, "", 2) == "Done · 5s · 3 tools · 2 subagents", mod._done_line(5000, 3, "", 2))
 check("done line: one subagent singular", mod._done_line(None, 0, "", 1) == "Done · 1 subagent")
+
+print("text shown before an ask")
+
+ask_st = mod._TurnState()
+mod._on_stream_event({"type": "content_block_delta", "delta": {"type": "text_delta", "text": "x" * 30}}, ask_st, False)
+
+
+async def count_after_late_registration():
+    waiter = asyncio.ensure_future(mod._text_before_ask(ask_st))
+    await asyncio.sleep(0.12)
+    still_waiting = not waiter.done()
+    mod._on_stream_event({"type": "content_block_delta", "delta": {"type": "text_delta", "text": "y" * 12}}, ask_st, False)
+    mod._on_tool_use(mod._ASK_USER_TOOL, {"questions": [{"question": "q"}]}, "a1", ask_st, False, 1.0)
+    return still_waiting, await waiter
+
+
+still_waiting, shown = asyncio.run(count_after_late_registration())
+check("waits until the loop has registered the ask", still_waiting)
+check("counts text the loop consumed before registering it", shown == 42, shown)
+
+sub_st = mod._TurnState()
+mod._on_tool_use(mod._ASK_USER_TOOL, {"questions": [{"question": "q"}]}, "a2", sub_st, False, 1.0, parent_id="agent1")
+check("a subagent's ask reports no count", asyncio.run(mod._text_before_ask(sub_st)) is None)
+check("an ask the loop never registers falls back to the count", asyncio.run(mod._text_before_ask(mod._TurnState(), timeout=0.1)) == 0)
 
 report("turn handler tests passed")
