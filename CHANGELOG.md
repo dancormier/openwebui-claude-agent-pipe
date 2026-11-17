@@ -4,6 +4,25 @@ Patches on top of [tfriedel/openwebui-claude-code](https://github.com/tfriedel/o
 commit `5bbc1fc`, in the order they landed. Numbering matches the pipe's own
 comments and the pull requests that introduced them.
 
+## v0.3.14 (2026-11-16)
+
+- An attached image over 10 MiB is no longer dropped. Every image is saved
+  at full size (up to 64 MiB), and one over 2000 px or 4 MiB also gets a
+  downsized copy for the agent to view, with the original named for crops.
+  The copy needs Pillow, which Open WebUI ships; without it, or for a format
+  Pillow cannot decode (HEIC, SVG), the original is saved and the agent is
+  told no copy was made (#78).
+- A question that needs a typed answer no longer goes through the form. The
+  client drops an open form on a reconnect, a chat switch or an app switch,
+  and the text typed into it went with it. Such a question is now printed in
+  the reply and answered in the next message; an ask where every question
+  has options still gets the form (#79).
+- The agent is told how much of its reply was on screen when it asked. It
+  used to call the form before writing, then refer to a draft or findings as
+  "above" that it had never output. The prompt now says to write first, and
+  each `ask_user` result carries `text_shown_before` (#79).
+- Each ask is logged with its status and duration (#79).
+
 ## v0.3.13 (2026-10-16)
 
 - Leaving a chat while a question form is open no longer reads as "you
