@@ -53,7 +53,8 @@ repo is where the idea came from.
 - **Knowledge bases** — a Workspace Model's attached knowledge becomes
   `search_knowledge` / `list` / `read` / `grep` tools the agent calls itself.
 - **Images and artifacts** — attached images are written to the workdir for
-  the agent to read; files the agent creates in the workdir (and in `/tmp`,
+  the agent to read, with a 2000 px copy for anything larger (needs Pillow,
+  which Open WebUI ships); files the agent creates in the workdir (and in `/tmp`,
   if `SCAN_TMP_ARTIFACTS` is on) come back inline or as links.
 - **Repo-rooted chats** — `#repo:<name>` on a first message runs the chat
   inside an allowlisted repository (and loads its `CLAUDE.md` when
