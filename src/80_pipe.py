@@ -708,7 +708,9 @@
         # image_url content parts, which the text-only prompt extraction
         # drops. Write them to files under the workdir and reference the
         # paths in the prompt so the agent can Read them.
-        attachment_notes = _save_image_attachments(body, workdir)
+        # Off the event loop: decoding and resizing a large photo takes long
+        # enough to stall every other chat on the server.
+        attachment_notes = await asyncio.to_thread(_save_image_attachments, body, workdir)
         notes = "\n\n" + "\n".join(attachment_notes) if attachment_notes else ""
         turn_context = _extract_turn_context(body)
         if turn_context:

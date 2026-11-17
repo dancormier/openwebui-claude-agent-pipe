@@ -53,7 +53,7 @@ def save(data, mime="image/png"):
 
 
 def noted_paths(note):
-    return [pathlib.Path(p) for p in re.findall(r"(/\S+\.(?:png|jpg))", note)]
+    return [pathlib.Path(p) for p in re.findall(r"(/\S+\.(?:png|jpg|webp))", note)]
 
 
 def encoded(img, fmt, **kw):
@@ -67,6 +67,13 @@ notes, files, _ = save(tiny_png())
 check_eq("one note", len(notes), 1)
 check("note is the plain saved-to line", notes[0].endswith("— use Read to view it]"), notes[0])
 check_eq("only the original is written", len(files), 1)
+
+print("small file that cannot be decoded")
+notes, files, _ = save(b"not an image")
+if Image is None:
+    check("without Pillow a small file is offered as before", notes[0].endswith("— use Read to view it]"), notes[0])
+else:
+    check("with Pillow an undecodable file is not offered to Read as is", "no downsized copy could be made" in notes[0], notes[0])
 
 print("image over the old 10 MiB limit that cannot be decoded")
 junk = b"\x00" * (12 * 1024 * 1024)
@@ -119,6 +126,26 @@ else:
     view, _ = noted_paths(notes[0])
     width, height = Image.open(view).size
     check("copy is upright", height > width, (width, height))
+
+    print("transparent image flattened to jpeg")
+    clear = Image.new("RGBA", (3000, 3000), (0, 0, 0, 0))
+    for x in range(0, 3000, 3):
+        clear.putpixel((x, x), (0, 0, 0, 255))
+    notes, _, _ = save(encoded(clear, "WEBP", lossless=True), "image/webp")
+    view, _ = noted_paths(notes[0])
+    check("transparent background comes out white", Image.open(view).getpixel((10, 1500))[0] > 240, Image.open(view).getpixel((10, 1500)))
+
+    print("16-bit greyscale keeps its range")
+    ramp = Image.linear_gradient("L").resize((3000, 3000)).convert("I").point(lambda v: v * 256).convert("I;16")
+    notes, _, _ = save(encoded(ramp, "PNG"))
+    view, _ = noted_paths(notes[0])
+    low, high = Image.open(view).convert("L").getextrema()
+    check("copy spans dark to light", low < 20 and high > 235, (low, high))
+
+    print("decompression bomb")
+    notes, files, _ = save(encoded(Image.new("1", (20000, 20000)), "PNG"))
+    check("small file with huge pixels is not offered to Read as is", "no downsized copy could be made" in notes[0], notes[0])
+    check_eq("no copy written", len(files), 1)
 
     print("small image is left alone")
     notes, files, _ = save(encoded(Image.new("RGB", (800, 600), "white"), "PNG"))
