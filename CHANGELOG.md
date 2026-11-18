@@ -4,14 +4,14 @@ Patches on top of [tfriedel/openwebui-claude-code](https://github.com/tfriedel/o
 commit `5bbc1fc`, in the order they landed. Numbering matches the pipe's own
 comments and the pull requests that introduced them.
 
-## Unreleased
+## v0.3.15 (2026-11-17)
 
 - The cold-chat warning offers a third reply, `compact`. The pipe runs
   `/compact` on the resumed session, then sends the held message on top of
   the summary. The first turn still reads the whole context once; later
   turns and the next cold gap carry the summary instead. The summary keeps
   the gist, not exact wording or old tool output. The compaction status now
-  names the context size before it was compacted.
+  names the context size before it was compacted (#81).
 
 ## v0.3.14 (2026-11-16)
 
