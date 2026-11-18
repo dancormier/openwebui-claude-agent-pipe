@@ -194,7 +194,8 @@
                 "Resuming such a chat re-processes its whole context as a "
                 "cache write (2x the input price), so one message can cost "
                 "as much as a long conversation. The next reply goes ahead "
-                "regardless (`continue` sends the held message); a message "
+                "regardless (`continue` sends the held message, `compact` "
+                "summarizes the chat first and then sends it); a message "
                 "starting with '/resume' skips the check. Chats from clients "
                 "that send no chat id (Conduit) are never held."
             ),
@@ -721,6 +722,7 @@
                 + "\n".join(turn_context)
             )
 
+        compact_first = False
         if chat_id:
             meta = _load_session_meta(workdir_root, chat_id)
             now = time.time()
@@ -730,7 +732,13 @@
                 held = meta.get("cold_warned_prompt")
                 # The agent never saw the held message, so a bare "continue"
                 # stands in for it rather than arriving on its own.
-                if isinstance(held, str) and held and _is_cold_ack(prompt):
+                # Compacting needs a session to summarize; a failed resume's
+                # cold retry has none and falls through to a plain send.
+                compact_ack = _is_compact_ack(prompt)
+                if isinstance(held, str) and held and (
+                    compact_ack or _is_cold_ack(prompt)
+                ):
+                    compact_first = compact_ack and bool(resume_id)
                     held_effort, prompt = _extract_effort_prefix(held)
                     effort_override = effort_override or held_effort
             elif (
@@ -975,6 +983,26 @@
                     inflight.interrupt = client.interrupt
                     if inflight.stopped_previous:
                         prompt = _with_overlap_note(prompt)
+                if compact_first:
+                    await emit_status("Session: compacting context…")
+                    await client.query("/compact")
+                    compacted = False
+                    async for message in client.receive_response():
+                        if not isinstance(message, SystemMessage):
+                            continue
+                        if message.subtype == "init" and message.data.get("session_id"):
+                            # The session is up: a failure from here on must
+                            # not trigger the failed-resume cold retry.
+                            state.turn_session_id = message.data["session_id"]
+                        elif message.subtype == "compact_boundary":
+                            compacted = True
+                            await emit_status(_compact_status(message.data))
+                    if inflight is not None and inflight.superseded:
+                        await emit_status("Stopped", done=True)
+                        yield "\n\n_Stopped: a newer message arrived in this chat._\n"
+                        return
+                    if not compacted:
+                        await emit_status("Session: compaction failed, sending in full context")
                 await client.query(prompt)
                 async for message in client.receive_response():
                     if isinstance(message, SystemMessage):
@@ -1007,7 +1035,7 @@
                         elif message.subtype == "compact_boundary":
                             # Auto-compaction summarized earlier history — the
                             # context number will drop; say why.
-                            await emit_status("Session: context compacted")
+                            await emit_status(_compact_status(message.data))
                         continue
 
                     if isinstance(message, StreamEvent):

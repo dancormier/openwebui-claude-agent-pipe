@@ -32,6 +32,7 @@ USER = {"id": "u1"}
 class FakeClient:
     instances = []
     fail_before_init = False
+    compact_fails = False
 
     def __init__(self, options=None):
         self.options = options.__dict__
@@ -58,6 +59,11 @@ class FakeClient:
         if FakeClient.fail_before_init:
             raise RuntimeError("resume failed")
         yield mod.SystemMessage(subtype="init", data={"session_id": sid})
+        if self.queries[-1] == "/compact" and not FakeClient.compact_fails:
+            yield mod.SystemMessage(subtype="compact_boundary", data={
+                "session_id": sid,
+                "compact_metadata": {"trigger": "manual", "pre_tokens": 265_000, "post_tokens": 18_000},
+            })
         yield mod.ResultMessage(subtype="success", duration_ms=100, is_error=False, result="", num_turns=1)
 
 
@@ -104,6 +110,14 @@ for text in ("continue", "Continue.", "  ok!", "GO", "yes", "ok..."):
     check(f"ack: {text!r}", mod._is_cold_ack(text))
 for text in ("continue with the plan", "okay", "no", "", "go ahead"):
     check(f"not ack: {text!r}", not mod._is_cold_ack(text))
+for text in ("compact", "Compact.", " /compact ", "COMPACT!"):
+    check(f"compact ack: {text!r}", mod._is_compact_ack(text))
+for text in ("compact it please", "compaction", "continue", ""):
+    check(f"not a compact ack: {text!r}", not mod._is_compact_ack(text))
+check_eq("compact status with counts",
+         mod._compact_status({"compact_metadata": {"pre_tokens": 265_000, "post_tokens": 18_000}}),
+         "Session: context compacted (was 265k)")
+check_eq("compact status without counts", mod._compact_status({}), "Session: context compacted")
 check_eq("resume prefix stripped", mod._extract_resume_prefix("  /resume do it"), (True, "do it"))
 check_eq("resume prefix alone", mod._extract_resume_prefix("/resume"), (True, ""))
 check_eq("resume prefix case-insensitive", mod._extract_resume_prefix("/RESUME x"), (True, "x"))
@@ -155,6 +169,7 @@ check("held: prices the cache write", "$2.12 on claude-opus-5-5" in out, out)
 check("held: pickup note names the chat, links it, carries the message",
       "Continuing from chat cold (https://chat.example.com/c/cold) — read it for context first. ship the fix" in out, out)
 check("held: says how to go ahead", "`continue`" in out, out)
+check("held: offers compact", "`compact`" in out, out)
 m = meta("cold")
 check("held: warning recorded with the message as typed",
       m.get("cold_warned_prompt") == "/effort max ship the fix" and isinstance(m.get("cold_warned_at"), (int, float)), m)
@@ -241,6 +256,41 @@ check("failed resume: warning still pending", "cold_warned_prompt" in meta("retr
 _, client = turn("retry", "continue")
 check("after a failed resume, continue still sends the held message",
       client is not None and client.queries[-1].endswith("\n\nthe held question"), client and client.queries)
+
+# ---- compact: summarize on the resumed session, then send the held message ----
+seed("compact")
+turn("compact", "/effort high the held question")
+out, client = turn("compact", "compact")
+check("compact: /compact runs first, then the held message",
+      client is not None and client.queries == ["/compact", "the held question"], client and client.queries)
+check("compact: held /effort applies", client and client.options.get("effort") == "high", client and client.options.get("effort"))
+check("compact: resumes the session", client and client.options.get("resume") == "sess-compact")
+check("compact: warning cleared", "cold_warned_prompt" not in meta("compact"), meta("compact"))
+
+seed("compactfail")
+turn("compactfail", "the held question")
+FakeClient.compact_fails = True
+_, client = turn("compactfail", "compact")
+FakeClient.compact_fails = False
+check("compaction that reports no boundary still sends the held message",
+      client is not None and client.queries == ["/compact", "the held question"], client and client.queries)
+
+turn("compact", "compact")
+check("compact with no warning pending: sent as typed", FakeClient.instances[-1].queries == ["compact"], FakeClient.instances[-1].queries)
+
+seed("compactretry")
+turn("compactretry", "the held question")
+FakeClient.fail_before_init = True
+FakeClient.instances = []
+try:
+    asyncio.run(collect(pipe._pipe_stream({"messages": [{"role": "user", "content": "compact"}]}, "compactretry", None, None, USER)))
+except Exception:
+    pass
+FakeClient.fail_before_init = False
+_, client = turn("compactretry", "compact")
+check("after a failed resume there is no session to compact: held message sent alone",
+      client is not None and "/compact" not in client.queries and client.queries[-1].endswith("the held question"),
+      client and client.queries)
 pipe.valves.COLD_RESUME_GUARD = saved
 
 # ---- a warning shown before the guard was switched off still releases ----
