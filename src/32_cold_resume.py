@@ -13,6 +13,7 @@ _INPUT_USD_PER_MTOK = {
 
 _RESUME_PREFIX_RX = re.compile(r"/resume(?:\s+|$)", re.IGNORECASE)
 _COLD_ACK_RX = re.compile(r"(?:continue|go|yes|ok)[.!]*", re.IGNORECASE)
+_COMPACT_ACK_RX = re.compile(r"/?compact[.!]*", re.IGNORECASE)
 
 
 def _extract_resume_prefix(prompt: str) -> Tuple[bool, str]:
@@ -27,6 +28,19 @@ def _extract_resume_prefix(prompt: str) -> Tuple[bool, str]:
 
 def _is_cold_ack(prompt: str) -> bool:
     return bool(_COLD_ACK_RX.fullmatch(prompt.strip()))
+
+
+def _is_compact_ack(prompt: str) -> bool:
+    return bool(_COMPACT_ACK_RX.fullmatch(prompt.strip()))
+
+
+def _compact_status(data: Dict[str, Any]) -> str:
+    # post_tokens leaves out the system prompt and tools, so it reads far
+    # below the context total the Done line reports; show only the before.
+    pre = (data.get("compact_metadata") or {}).get("pre_tokens")
+    if isinstance(pre, int):
+        return f"Session: context compacted (was {_fmt_tokens(pre)})"
+    return "Session: context compacted"
 
 
 def _cold_warning_pending(meta: Dict[str, Any], now: float) -> bool:
@@ -86,6 +100,9 @@ def _cold_resume_warning(
         f"cache-write price{price}.\n\n"
         "To start fresh instead, paste this into a new chat:\n\n"
         f"{_code_fence(pickup)}\n\n"
+        "Reply `compact` to summarize this chat first and then send your "
+        "message here: one full read now, a much smaller context after. The "
+        "summary keeps the gist, not exact wording or old tool output.\n\n"
         "Reply `continue` to send your message here anyway, or send anything "
         "else to carry on in this chat.\n"
     )
